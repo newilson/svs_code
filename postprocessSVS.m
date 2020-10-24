@@ -1,5 +1,7 @@
 function output = postprocessSVS(filename,pars)
 
+addpath('utils');
+
 if nargin<2 || ~isfield(pars,'fitmode')
     pars.fitmode = 3; % 1: Gaussian, 2: Lorentzian, 3: Complex Lorentzian, 4: Complex Gaussian
 end

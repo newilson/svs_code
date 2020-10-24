@@ -1,4 +1,5 @@
-fname = 'D:\CODE\MATLAB\neil\svs_code\20200914_DYER_MR_ES_CC017_19.rda';
+% fname = 'D:\CODE\MATLAB\neil\svs_code\20200914_DYER_MR_ES_CC017_19.rda';
+fname = fullfile(pwd,'20200914_DYER_MR_ES_CC017_19.rda');
 
 pars.fitmode = 3;
 
