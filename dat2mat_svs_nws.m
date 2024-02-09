@@ -1,6 +1,6 @@
-function [ws, nws, ppm] = dat2mat_svs(ws_dat,nws_dat,pars)
+function [ws, nws, ppm] = dat2mat_svs_nws(nws_dat,pars)
 %
-% [ws, nws, ppm] = dat2mat_svs(ws_dat,nws_dat)
+% [ws, nws, ppm] = dat2mat_svs_nws(nws_dat)
 %
 % Steps:
 % eddy current/first order correction
@@ -18,11 +18,25 @@ plt = true;
 addpath('mapVBVD')
 addpath('utils')
 
-if nargin<2
+if nargin<1 || isempty(nws_dat)
     [file,path] = uigetfile('*.dat','Choose NWS dat file');
     nws_dat = fullfile(path,file);
-    [file,path] = uigetfile('*.dat','Choose WS dat file');
-    ws_dat = fullfile(path,file);
+end
+
+if nargin<2 || isempty(pars)
+    pars.plt = false;
+end
+if ~isfield(pars,'removeOS')
+    pars.removeOS = false;
+end
+if ~isfield(pars,'lb')
+    pars.lb = 1;
+end
+if ~isfield(pars,'ccopt')
+    pars.ccopt.minsig_frac = 0.05;
+end
+if ~isfield(pars,'block_size')
+    pars.block_size = []; % no block averaging
 end
 
 % non water suppressed
@@ -31,8 +45,8 @@ if iscell(nws_obj)
     nws_obj = nws_obj{end};
 end
 nws_obj.image.flagRemoveOS = false; % oversampling
-nws_obj.image.flagDoAverage = true;
-nws_obj.image.flagAverageSets = true; % cmrr sequence uses 'sets' variable for avgs
+nws_obj.image.flagDoAverage = false;
+nws_obj.image.flagAverageSets = false; % cmrr sequence uses 'sets' variable for avgs
 bw = 1e9/nws_obj.hdr.Config.DwellTimeSig;
 f0 = 1e-6*nws_obj.hdr.Config.Frequency;
 nch = nws_obj.image.NCha;
@@ -43,11 +57,9 @@ if ~isequal(npts,vectorSize)
 end
 seqname = nws_obj.hdr.MeasYaps.tSequenceFileName;
 
+nave = nws_obj.image.NAve * nws_obj.image.NSet; % cmrr uses 'sets' for 'avgs'
+
 nws = nws_obj.image{''};
-if ndims(nws)>2
-    nws = nws(:,:,1);
-%     nws = mean(nws,3);
-end
 
 % timing correction - needed for eja_slaser_svs
 if contains(seqname,'eja_svs_slaser')
@@ -59,42 +71,18 @@ if contains(seqname,'eja_svs_slaser')
 else
     delay_ind = 0;
 end
-nws = nws(delay_ind+1:end,:);
-nws = nws(1:vectorSize,:);
+nws = nws(delay_ind+1:end,:,:,:,:,:,:,:,:,:,:,:,:,:,:,:);
+nws = nws(1:vectorSize,:,:,:,:,:,:,:,:,:,:,:,:,:,:);
 
 % remove OS
-removeOS = false;
-if removeOS
+if pars.removeOS
     keepOS = [1:vectorSize/4, 1+vectorSize*3/4:vectorSize];
     nws = ifft(nws,[],1);
-    nws = fft(nws(keepOS,:),[],1);
+    nws = fft(nws(keepOS,:,:,:,:,:,:,:,:,:,:,:,:,:,:,:),[],1);
     bw = bw/2;
     npts = vectorSize/2;
 else
     npts = vectorSize;
-end
-
-% water suppressed
-ws_obj = mapVBVD(ws_dat);
-if iscell(ws_obj)
-    ws_obj = ws_obj{end};
-end
-ws_obj.image.flagRemoveOS = false; % oversampling
-ws_obj.image.flagAverageSets = false; % cmrr sequence uses 'sets' variable for avgs
-
-if ~isequal(f0,1e-6*ws_obj.hdr.Config.Frequency) || ~isequal(nch,ws_obj.image.NCha) || ~isequal(nws_obj.image.NCol,ws_obj.image.NCol)
-    error('inconsistent protocols')
-end
-nave = ws_obj.image.NAve * ws_obj.image.NSet; % cmrr uses 'sets' for 'avgs'
-
-ws = ws_obj.image{''};
-ws = ws(delay_ind+1:end,:,:,:,:,:,:,:,:,:,:,:,:,:,:,:);
-ws = ws(1:vectorSize,:,:,:,:,:,:,:,:,:,:,:,:,:,:);
-
-% remove OS
-if removeOS
-    ws = ifft(ws,[],1);
-    ws = fft(ws(keepOS,:,:,:,:,:,:,:,:,:,:,:,:,:,:,:),[],1);
 end
 
 % time axis
@@ -104,30 +92,26 @@ t = (0:npts-1)*1/bw;
 hz = (-1/2:1/npts:1/2-1/npts)*bw;
 ppm = 4.72 + hz/f0;
 
-disp('eddy current correction')
-eccopt = -1;
-[ws, nws] = eddyCurrentCorrection(nws,ws,eccopt);
+disp('zero order phase correction')
+pars.eccopt = -1;
+[~, nws] = eddyCurrentCorrection(nws,nws,pars.eccopt);
 
 disp('filtering')
-lb = 3;
-[ws,filt] = expFilter(t,lb,ws);
-nws = expFilter(t,lb,nws);
+[nws,filt] = expFilter(t,pars.lb,nws);
 
 disp('coil combination')
-ccopt.minsig_frac = 0.05;
-[weights, ws, nws] = coilCombinationNoPC(nws,ccopt.minsig_frac,ws);
-if plt
+[weights, ~, nws] = coilCombinationNoPC(nws,pars.ccopt.minsig_frac,nws);
+if pars.plt
     figure, plot(weights,'*'), title('coil weights')
 end
 
 disp('block averaging')
-block_size = [];
-ws = blockAverage(ws,block_size);
+nws = blockAverage(nws,pars.block_size);
 
-disp('residual water removal')
+disp('water signal separation')
 
 wsopts.type = 'none';
-if plt && ~strcmp(wsopts.type,'none')
+if pars.plt && ~strcmp(wsopts.type,'none')
     figure, plot(ppm,real(fftshift(fft(sum(ws(:,:),2),[],1),1)),'b'), title('water removal')
     hold on
 end

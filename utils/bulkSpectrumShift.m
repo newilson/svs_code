@@ -27,4 +27,4 @@ for ii=1:size(specmag,2)
     hzshift(ii) = hz(ind);
     spec_sh(:,ii) = shiftSpectrumFrequency(spec(:,ii),hzshift(ii),t);
 end
-
+spec_sh = reshape(spec_sh,si);

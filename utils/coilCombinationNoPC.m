@@ -18,13 +18,22 @@ fidcc = []; fid_refcc = [];
 if nargout>1 && nargin>2 && ~isempty(fid)
     [npts,nc] = size(fid_ref);
     si = size(fid);
+    fid = fid(:,:,:); % make 3d maximum
     if ~isequal(si(2),nc)
         return;
     end
     fid_refcc = zeros(npts,1);
-    fidcc = zeros([si(1) si(3:end)]);
+    if length(si)<3
+        fidcc = zeros(npts,1);
+    else
+        fidcc = zeros([si(1) prod(si(3:end))]);
+    end
     for ii=1:nc
         fid_refcc = fid_refcc + fid_ref(:,ii)*weights(ii);
         fidcc = fidcc + squeeze(fid(:,ii,:))*weights(ii);
     end
+    if ~(length(si)<3)
+        fidcc = reshape(fidcc,si([1 3:end]));
+    end
+
 end

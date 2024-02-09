@@ -4,13 +4,18 @@ function fidba = blockAverage(fid,block_size)
 %
 % fid is [npts x navgs x other stuff]
 
-if nargin<2
+if nargin<2 || isempty(block_size)
     fidba = fid;
     return;
 end
 
 si = size(fid);
 siba = si;
+if si(2)<block_size || mod(si(2),block_size)
+    warning('block averaging not performed')
+    fidba = fid;
+    return;
+end
 siba(2) = si(2)/block_size;
 fidba = zeros(siba);
 

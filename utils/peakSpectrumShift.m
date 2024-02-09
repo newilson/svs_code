@@ -7,6 +7,12 @@ function [spec_sh,hzshift] = peakSpectrumShift(spec,hz,f0,lb,peaks,ranges)
 % ranges is the lb and ub for singlets and is [npeaks x 2]
 %
 
+if isempty(peaks)
+    spec_sh = spec;
+    hzshift = 0;
+    return;
+end
+
 if ~isequal(length(hz),size(spec,1))
     error('inconsistent dimensions')
 end

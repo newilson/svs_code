@@ -1,4 +1,4 @@
-function [rda,Time_domain_data] = Read_rda_file(rda_filename)
+function [rda,Time_domain_data,txthdr] = Read_rda_file(rda_filename)
 %
 % Read spectroscopy data from Siemens machine
 %
@@ -10,6 +10,7 @@ function [rda,Time_domain_data] = Read_rda_file(rda_filename)
 %
 % MDR 11 June 2002
 %
+% NW 2021
 
 if(nargin < 1)
 [filename , pathname ] = uigetfile('*.rda' , 'Select an RDA file');
@@ -22,10 +23,12 @@ head_start_text = '>>> Begin of header <<<';
 head_end_text = '>>> End of header <<<';
 
 tline = fgets(fid);
+txthdr = tline; % NW
 
 while (isempty(strfind(tline , head_end_text)))
 
 tline = fgets(fid);
+txthdr = [txthdr tline]; % NW
 
 if ( isempty(strfind (tline , head_start_text)) + isempty(strfind (tline , head_end_text )) == 2)
 

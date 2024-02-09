@@ -15,7 +15,8 @@ end
 fid = ifft(ifftshift(spec,1),[],1);
 si = size(fid);
 fid = reshape(fid,si(1),[]);
-if length(hzshift>1)
+if length(hzshift)>1
+    hzshift = hzshift(:);
     if ~isequal(length(hzshift),size(fid,2))
         error('inconsistent dimensions')
     else
@@ -30,3 +31,4 @@ else
 end
 
 spec_sh = fftshift(fft(fid,[],1),1);
+spec_sh = reshape(spec_sh,si);
