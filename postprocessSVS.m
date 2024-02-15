@@ -3,7 +3,7 @@ function output = postprocessSVS(filename,pars)
 addpath('utils');
 
 if nargin<2 || ~isfield(pars,'fitmode')
-    pars.fitmode = 3; % 1: Gaussian, 2: Lorentzian, 3: Complex Lorentzian, 4: Complex Gaussian
+    pars.fitmode = 3; % 0: None, 1: Gaussian, 2: Lorentzian, 3: Complex Lorentzian, 4: Complex Gaussian
 end
 
 if nargin<2 || ~isfield(pars,'peaks')
@@ -23,9 +23,9 @@ if contains(filename,'.rda')
 	f0 = output.hdr.MRFrequency;
 elseif contains(filename,'.IMA') | contains(filename,'.dcm')
     [output.complex_fid, output.hdr, output.short_hdr] = readSiemensDicomSpectrum(filename);
-	npts = output.hdr.npts;
-	bw = output.hdr.bw;
-	f0 = output.hdr.f0;
+	npts = output.short_hdr.npts;
+	bw = output.short_hdr.bw;
+	f0 = output.short_hdr.f0;
 else
     error('unknown file type')
 end
@@ -129,7 +129,10 @@ if pars.fitmode>0
     output.short_hdr.flag.fit = true;
 end
 
+output.fid = fid;
 output.spec = spec;
 output.ppm = ppm;
 output.time = t;
 output.hz = hz;
+
+rmpath('utils');

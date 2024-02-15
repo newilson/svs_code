@@ -35,8 +35,10 @@ if nargout>2
         end
         indasc1 = strfind(pvthdr,'### ASCCONV BEGIN');
         indasc2 = strfind( pvthdr(indasc1(1):length(pvthdr)), '### ASCCONV END' );
-        fwrite( ftxt, pvthdr(indasc1(1):indasc1(1)+indasc2(1)+19) );
-        fclose(ftxt);
+        if ~isequal(ftxt,-1)
+            fwrite( ftxt, pvthdr(indasc1(1):indasc1(1)+indasc2(1)+19) );
+            fclose(ftxt);
+        end
         clear pvthdr;
     end
     
@@ -160,6 +162,14 @@ if nargout>2
                 end
             end
         end
+
+        % NW
+        tnamestr = 'adFlipAngleDegree';
+        if (~isempty(strfind(str1,tnamestr)))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.flipAngle = (sscanf(tname,'%i',1));
+        end
         
     end  % While ASCCONV
     fclose(fid2);
@@ -170,6 +180,13 @@ if nargout>2
 		else
 			hdr.npts = hdr.npts*2;
         end
+    end
+
+    if isfield(hdr,'nx') && isfield(hdr,'ny') && hdr.nx * hdr.ny > 1
+        if ~isfield(hdr,'nz')
+            hdr.nz = 1;
+        end
+        complex_fid = reshape(complex_fid,hdr.npts,hdr.nx,hdr.ny,hdr.nz);
     end
         
 end
