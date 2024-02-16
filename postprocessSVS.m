@@ -103,13 +103,20 @@ if ~isempty(pars.peaks)
 end
 
 % phase correction
-if ~isfield(pars,'PC') || ~isnan(pars.PC)
+if ~isfield(pars,'PC') || isempty(pars.PC)
     f = NWman_phase(spec,ppm,'Manual phase correction: save and close when done');
     waitfor(f);
     if exist('out','var')
         spec = out; clear out
         output.short_hdr.flag.pc = true;
         pars.PC = parsPC;
+    end
+elseif isnumeric(pars.PC)
+    if pars.PC~=zeros(size(pars.PC))
+        if ~isfield(pars,'PCpivot')
+            pars.PCpivot = 4.72;
+        end
+        spec = shiftSpectrumPhase(spec,pars.PC,ppm,pars.PCpivot);
     end
 end
 
