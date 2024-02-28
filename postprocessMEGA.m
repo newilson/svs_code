@@ -78,7 +78,7 @@ for ii=1:2
             output.short_hdr{ii}.flag.lb = true;
         end
     end
-git gui
+
     % remove residual water
     if isfield(pars,'wsopts')
         wsopts = pars.wsopts;
