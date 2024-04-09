@@ -1,6 +1,9 @@
 function output = postprocessSVS(filename,pars)
 
-addpath('utils');
+% in case current directory is not this one
+thisFile = mfilename('fullpath');
+thisPath = fileparts(thisFile);
+addpath([thisPath filesep 'utils']);
 
 if nargin<2 || ~isfield(pars,'fitmode')
     pars.fitmode = 3; % 0: None, 1: Gaussian, 2: Lorentzian, 3: Complex Lorentzian, 4: Complex Gaussian
@@ -142,4 +145,4 @@ output.ppm = ppm;
 output.time = t;
 output.hz = hz;
 
-rmpath('utils');
+rmpath([thisPath filesep 'utils']);
