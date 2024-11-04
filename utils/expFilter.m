@@ -22,7 +22,7 @@ else
 end
 
 out = [];
-filt = exp(-2*pi*t(:)*lb);
+filt = exp(-pi*t(:)*lb); % not 2pi (fixed 11/4/24)
 
 if ~isempty(in)
     si = size(in);
