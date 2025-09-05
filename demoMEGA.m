@@ -1,6 +1,6 @@
 % demo of postprocessMEGA.m
 
-scan = 2;
+scan = 6;
 
 pars.lb = 2; % 2 Hz line broadening
 pars.den = 'none'; % no additional denoising
@@ -43,10 +43,22 @@ switch scan
         filenames{2} = [mainDir filesep 'S106_02212024_dacc_gaba-editon.rda'];
         filenames{3} = [mainDir filesep 'S106_02212024_dacc_symMM_gaba-editoff.rda'];
         filenames{4} = [mainDir filesep 'S106_02212024_dacc_symMM_gaba-editon.rda'];
-    case 6 % 1st subject
-        mainDir = 'Y:\users\rnanga\853707_CEW\853707_S01_03212024\rdafiles';
+    case 6 % 1st subject scan1
+        mainDir = '/Volumes/camipm/users/rnanga/853707_CEW/853707_S01_03212024/rdafiles';
         filenames{1} = [mainDir filesep '853707_S01_03212024_gabaMM_editoff.rda'];
         filenames{2} = [mainDir filesep '853707_S01_03212024_gabaMM_editon.rda'];
+    case 7 % 1st subject scan2
+        mainDir = '/Volumes/camipm/users/rnanga/853707_CEW/853707_S01_04112024/rdafiles';
+        filenames{1} = [mainDir filesep '853707_S01_04112024_gabaMM_editoff.rda'];
+        filenames{2} = [mainDir filesep '853707_S01_04112024_gabaMM_editon.rda'];
+    case 8 % 2nd subject scan1
+        mainDir = '/Volumes/camipm/users/rnanga/853707_CEW/853707_S02_04082024/rdafiles';
+        filenames{1} = [mainDir filesep '853707_S02_04082024_gabaMM_editoff.rda'];
+        filenames{2} = [mainDir filesep '853707_S02_04082024_gabaMM_editon.rda'];
+    case 9 % 3rd subject scan1
+        mainDir = '/Volumes/camipm/users/rnanga/853707_CEW/853707_S03_04152024/rdafiles';
+        filenames{1} = [mainDir filesep '853707_S03_04152024_gabaMM_editoff.rda'];
+        filenames{2} = [mainDir filesep '853707_S03_04152024_gabaMM_editon.rda'];
 end
 
 output = postprocessMEGA(filenames(1:2),pars);
