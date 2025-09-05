@@ -37,7 +37,7 @@ elseif strcmp(opts.type,'hsvd')
     end
 elseif strcmp(opts.type,'filt')
     if ~isfield(opts.filt,'N')
-        opts.filt.N = 20;
+        opts.filt.N = 11;
     end
     if ~isfield(opts.filt,'type')
         opts.filt.type = 'average'; % average or gaussian
@@ -55,7 +55,7 @@ fid = reshape(fid,si(1),[]);
 fidws = zeros(size(fid));
 switch opts.type
     case 'hsvd'
-        fidws = transpose(h2osup_big(transpose(fid), opts.hsvd.bounds, opts.hsvd.nsin));
+        fidws = transpose(h2osup_bigPar(transpose(fid), opts.hsvd.bounds, opts.hsvd.nsin));
     case 'wavelet'
         for ii=1:size(fid,2)
             if fid(:,ii)~=0*fid(:,ii)
