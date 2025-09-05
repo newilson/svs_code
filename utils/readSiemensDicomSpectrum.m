@@ -1,4 +1,4 @@
-function [complex_fid,info,hdr] = readSiemensDicomSpectrum(filename)
+function [complex_fid,info,hdr,txtname] = readSiemensDicomSpectrum(filename)
 % NW
 
 if nargin<1 || isempty(filename)
@@ -163,13 +163,40 @@ if nargout>2
             end
         end
 
-        % NW
+        % NW - add-ons below
         tnamestr = 'adFlipAngleDegree';
-        if (~isempty(strfind(str1,tnamestr)))
+        if (contains(str1,tnamestr))
             tindex1 = strfind(str1,'=')+1;
             tname = str1(tindex1:numel(str1));
             hdr.flipAngle = (sscanf(tname,'%i',1));
         end
+
+        tnamestr = 'sTXSPEC.asNucleusInfo[0].flReferenceAmplitude';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.refVolt = (sscanf(tname,'%i',1));
+        end
+
+        tnamestr = 'sTXSPEC.asNucleusInfo[0].tNucleus';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'""')+2;
+            tindex2 = length(str1)-2;
+            tname = str1(tindex1(1):tindex2);
+            hdr.Nucleus = tname;
+            if (contains(tname,'1H'))
+                hdr.gamma = 42.5756;
+            elseif (contains(tname,'23N'))
+                hdr.gamma = 11.2620;
+            elseif (contains(tname,'17O'))
+                hdr.gamma = 5.7716;
+            elseif (contains(tname,'13C'))
+                hdr.gamma = 10.7063;
+            else
+                hdr.gamma = 42.5756;
+            end
+        end
+
         
     end  % While ASCCONV
     fclose(fid2);
