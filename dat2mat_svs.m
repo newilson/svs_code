@@ -108,10 +108,33 @@ disp('eddy current correction')
 eccopt = -1;
 [ws, nws] = eddyCurrentCorrection(nws,ws,eccopt);
 
-disp('filtering')
+disp('exponential filtering')
 lb = 3;
 [ws,filt] = expFilter(t,lb,ws);
 nws = expFilter(t,lb,nws);
+
+disp('mlsvd denoising')
+if isfield(pars,'domlsvd')
+    if isfield(pars.domlsvd,'status')
+        if pars.domlsvd.status==true % domlsvd
+            addpath('..\tensorlab_2016-03-28');
+            if isfield(pars.mlsvd,'singularValues') && length(pars.mlsvd.singularValues)==ndims(ws)
+                [Ufull,Sfull,svfull] = mlsvd(ws);
+                for ii=1:length(Ufull)
+                    Ut{ii} = Ufull{ii}(1:pars.mlsvd.singularValues(ii));
+                end
+                idx = arrayfun(@(k) 1:size_core(k), 1:numel(size_core), 'UniformOutput', false);
+                St  = Sfull(idx{:});     % equivalent to Sfull(1:n1, 1:n2, ..., 1:nN)
+                ws = lmlragen(Ut,St);
+            else % automatic rank estimation
+                [~,~,~,~,Ut,St] = mlsvd_wRankEstNW(ws);
+                ws = lmlragen(Ut,St);
+            end
+            rmpath('..\tensorlab_2016-03-28');
+        end
+    end
+end
+
 
 disp('coil combination')
 ccopt.minsig_frac = 0.05;
