@@ -1,4 +1,4 @@
-function output = postprocessSVS(filename,pars)
+function [output, pars] = postprocessSVS(filename,pars)
 
 % in case current directory is not this one
 thisFile = mfilename('fullpath');
@@ -40,7 +40,13 @@ t = (0:npts-1)*1/bw;
 
 % freq axes
 hz = (-1/2:1/npts:1/2-1/npts)*bw;
-ppm = 4.72 - hz/f0;
+
+if contains(output.short_hdr.SeqName,'svssel_latest') && ~contains(output.short_hdr.SeqName,'svssel_latest0') % older versions up to svssel_latest021224 do not include this
+    center_freq = output.short_hdr.WIPdbl(4);
+else
+    center_freq = 4.72;
+end
+ppm = center_freq - hz/f0;
 
 % filtering
 if isfield(pars,'lb')
@@ -49,6 +55,18 @@ if isfield(pars,'lb')
         output.short_hdr.flag.lb = true;
     end
 end
+
+% remove residual water
+if isfield(pars,'wsopts')
+    if center_freq==4.72
+        fid = removeResidualWater(fid,pars.wsopts);
+    else
+        freqShiftHz = f0*(center_freq - 4.72);
+        fid = removeMetSignal(fid,freqShiftHz,t,pars.wsopts);
+    end
+    output.short_hdr.flag.ws = true;
+end
+
 
 % svd denoising
 if isfield(pars,'den') && strcmp(pars.den,'hsvd')
@@ -60,13 +78,6 @@ if isfield(pars,'den') && strcmp(pars.den,'hsvd')
     end
 end
 
-% remove residual water
-if isfield(pars,'wsopts')
-    wsopts = pars.wsopts;
-    fid = removeResidualWater(fid,wsopts);
-    output.short_hdr.flag.ws = true;
-end
-
 % FT
 spec = fftshift(fft(fid,[],1),1);
 
@@ -74,7 +85,7 @@ spec = fftshift(fft(fid,[],1),1);
 if isfield(pars,'den')
     switch pars.den
         case 'svd'
-            % hsvd denoising
+            % Casorati svd denoising
             if size(spec,2)>1
                 f = NWsvdTS(spec,ppm,'SVD denoising: save and close when done');
                 waitfor(f);

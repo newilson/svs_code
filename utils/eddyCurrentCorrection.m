@@ -1,10 +1,10 @@
-function [fidecc, fid_refecc] = eddyCurrentCorrection(fid_ref,fid,opt)
+function [fidecc, fid_refecc, phcorr] = eddyCurrentCorrection(fid_ref,fid,opt)
 %
-% [fidecc, fid_refecc] = eddyCurrentCorrection(fid_ref,fid,opt)
+% [fidecc, fid_refecc, phcorr] = eddyCurrentCorrection(fid_ref,fid,opt)
 %
 % fid_ref is [npts x nc x other stuff]
 % fid is [npts x nc x other stuff]
-% opt: 0 ECC, 1 QUALITY, 2 QUECC
+% opt: -1 BROWN, 0 ECC, 1 QUALITY, 2 QUECC
 
 if nargin<3 || isempty(opt)
     opt = 0; 

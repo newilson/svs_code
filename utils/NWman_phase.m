@@ -1,4 +1,7 @@
-function f = NWman_phase(spec,ax_vals,fig_title)
+function f = NWman_phase(spec,ax_vals,fig_title,spec_ref,ref_ax)
+
+if nargin<4, spec_ref = []; end
+if nargin<5 && ~isempty(spec_ref), ref_ax = ax_vals; end
 
 spec_orig = spec;
 
@@ -7,7 +10,7 @@ if ndims(spec)>2
 end
 
 isvec = false;
-if isvector(spec)==1
+if isvector(spec)
     isvec = true;
     spec = spec(:);
 end
@@ -29,7 +32,12 @@ else
     fig_title = [];
 end
 ax = axes('Parent',f,'position',[.1 .3 .7 .6]);
-h = plot(ax,ax_vals,squeeze(real(spec(:,1)))); 
+if ~isempty(spec_ref)
+    h = plot(ax,ax_vals,squeeze(real(spec(:,1))),'b-',ref_ax,squeeze(real(spec_ref(:,1))),'k:'); 
+    h = h(1);
+else
+    h = plot(ax,ax_vals,squeeze(real(spec(:,1)))); 
+end
 yl = [1.1*min(real(spec(:))), 0.9*max(real(spec(:)))];
 yl = sort(yl); % in case min>max
 ylim(ax,yl);

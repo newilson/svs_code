@@ -1,5 +1,9 @@
 function f = NWsemiman_base(spec,ax_vals,fig_title)
 
+% Used for ALS and arPLS
+global maxiter;
+maxiter = 10; 
+
 spec = double(spec);
 spec_orig = spec;
 
@@ -10,7 +14,7 @@ end
 isRe = isreal(spec);
 
 isvec = false;
-if isvector(spec)==1
+if isvector(spec)
     isvec = true;
     spec = spec(:);
 end
@@ -146,15 +150,20 @@ e7 = uicontrol('Parent',f,'style','edit','units','normalized','position',[.8 .04
     'callback',@updateMethodQu);
 set(e7,'string',0.10);
 
-bg = uibuttongroup('Visible','on','position',[.05 .9 .4 .1],'BorderType','none','SelectionChangedFcn',@updateMethod);
-r1 = uicontrol('Parent',bg,'style','radiobutton','units','normalized','position',[.05 .2 .5 .5],...
-    'string','Asymmetric Least Squares');
-r2 = uicontrol('Parent',bg,'style','radiobutton','units','normalized','position',[.65 .2 .4 .5],...
-    'string','Back Adjust');
-r1.Value = true; % default is ALS
+% bg = uibuttongroup('Visible','on','position',[.05 .9 .4 .1],'BorderType','none','SelectionChangedFcn',@updateMethod);
+% r1 = uicontrol('Parent',bg,'style','radiobutton','units','normalized','position',[.05 .2 .5 .5],...
+%     'string','Asymmetric Least Squares');
+% r2 = uicontrol('Parent',bg,'style','radiobutton','units','normalized','position',[.65 .2 .4 .5],...
+%     'string','Back Adjust');
+% r1.Value = true; % default is ALS
+
+pop0 = uicontrol('Parent',f,'style','popupmenu','units','normalized','position',[.15 .93 .1 .05],...
+    'string',{'None','ALS','arPLS','BackAdjust'},'value',1,'callback',@updateMethod);
+tpop0 = uicontrol('Parent',f,'style','text','units','normalized','position',[.05 .925 .07 .05],...
+    'string','Method','HorizontalAlignment','right','fontweight','bold','fontsize',11);
 
 updateVisibility;
-doBaselineALS;
+doBaselineNone;
 
 if ~exist('msbackadj') % check for file
     bg.Visible = 'off';
@@ -220,7 +229,11 @@ set(f,'visible','on','toolbar','figure')
 
     function updateLsl(source,callbackdata) % updated slider
         set(e4,'string',num2str(get(s3,'value')));
-        doBaselineALS;
+        if pop0.Value==2
+            doBaselineALS;
+        elseif pop0.Value==3
+            doBaselineARPLS;
+        end
     end
 
     function updatePed(source,callbackdata) % updated edit box
@@ -230,7 +243,11 @@ set(f,'visible','on','toolbar','figure')
 
     function updateLed(source,callbackdata) % updated edit box
         set(s3,'value',str2double(get(e4,'string')));
-        doBaselineALS;
+        if pop0.Value==2
+            doBaselineALS;
+        elseif pop0.Value==3
+            doBaselineARPLS;
+        end
     end
 
     function updateStepsl(source,callbackdata) % updated slider
@@ -265,17 +282,50 @@ set(f,'visible','on','toolbar','figure')
 
     function updateMethod(source,callbackdata) % updated radio button
         updateVisibility;
-        if r1.Value
+        val = pop0.Value;
+        if val==1
+            doBaselineNone;
+        elseif val==2
             doBaselineALS;
-        elseif r2.Value
+        elseif val==3
+            doBaselineARPLS;
+        elseif val==4
             doBaselineBA;
+        else
+            doBaselineNone;
         end
     end
 
     function updateVisibility
-        if r1.Value
+        val = pop0.Value;
+
+        if val==1 % None
+
+            % ALS/arPLS options
+            te3.Visible = 'off';
+            te4.Visible = 'off';
+            e3.Visible = 'off';
+            e4.Visible = 'off';
+            s2.Visible = 'off';
+            s3.Visible = 'off';
             
-            % ALS options
+            % BA options
+            te5.Visible = 'off';
+            te6.Visible = 'off';
+            te7.Visible = 'off';
+            te8.Visible = 'off';
+            te9.Visible = 'off';
+            e5.Visible = 'off';
+            e6.Visible = 'off';
+            e7.Visible = 'off';
+            s4.Visible = 'off';
+            s5.Visible = 'off';
+            pop1.Visible = 'off';
+            pop2.Visible = 'off';
+
+        elseif val==2 % ALS
+            
+            % ALS/arPLS options
             te3.Visible = 'on';
             te4.Visible = 'on';
             e3.Visible = 'on';
@@ -296,10 +346,34 @@ set(f,'visible','on','toolbar','figure')
             s5.Visible = 'off';
             pop1.Visible = 'off';
             pop2.Visible = 'off';
+
+        elseif val==3 % arPLS
             
-        elseif r2.Value
+            % ALS/arPLS options
+            te3.Visible = 'off';
+            te4.Visible = 'on';
+            e3.Visible = 'off';
+            e4.Visible = 'on';
+            s2.Visible = 'off';
+            s3.Visible = 'on';
             
-            % ALS options
+            % BA options
+            te5.Visible = 'off';
+            te6.Visible = 'off';
+            te7.Visible = 'off';
+            te8.Visible = 'off';
+            te9.Visible = 'off';
+            e5.Visible = 'off';
+            e6.Visible = 'off';
+            e7.Visible = 'off';
+            s4.Visible = 'off';
+            s5.Visible = 'off';
+            pop1.Visible = 'off';
+            pop2.Visible = 'off';
+            
+        elseif val==4 % BA
+            
+            % ALS/arPLS options
             te3.Visible = 'off';
             te4.Visible = 'off';
             e3.Visible = 'off';
@@ -322,13 +396,37 @@ set(f,'visible','on','toolbar','figure')
             pop2.Visible = 'on';
         end
     end
+    
+    function doBaselineNone
+        if ~isvec
+            slice = get(s1,'value');
+        else
+            slice = 1;
+        end
+        set(h,'ydata',squeeze(real(spec_orig(:,slice))))
+    end
 
     function doBaselineALS
         p = 10^str2double(get(e3,'string'));
         lambda = 10^str2double(get(e4,'string'));
         spec = 0*spec_orig;
         for ii=1:si(2)
-            baseline = baselinecalc(real(spec_orig(:,ii)),lambda,p);
+            baseline = baselinecalcALS(real(spec_orig(:,ii)),lambda,p);
+            spec(:,ii) = complex(real(spec_orig(:,ii)) - baseline, imag(spec_orig(:,ii)) - baseline); % same baseline subtraction for real/imag
+        end
+        if ~isvec
+            slice = get(s1,'value');
+        else
+            slice = 1;
+        end
+        set(h,'ydata',squeeze(real(spec(:,slice))))
+    end
+
+    function doBaselineARPLS
+        lambda = 10^str2double(get(e4,'string'));
+        spec = 0*spec_orig;
+        for ii=1:si(2)
+            baseline = baselinecalcARPLS(real(spec_orig(:,ii)),lambda);
             spec(:,ii) = complex(real(spec_orig(:,ii)) - baseline, imag(spec_orig(:,ii)) - baseline); % same baseline subtraction for real/imag
         end
         if ~isvec
@@ -388,18 +486,41 @@ set(f,'visible','on','toolbar','figure')
   
 end
 
-function z = baselinecalc(y, lambda, p)
+function z = baselinecalcALS(y, lambda, p)
 % Estimate baseline with asymmetric least squares
 
+    global maxiter
     m = length(y);
     D = diff(speye(m), 2);
     w = ones(m, 1);
     
-    for it = 1:6
+    for it = 1:maxiter
         W = spdiags(w, 0, m, m);
         C = chol(W + lambda * (D' * D));
         z = C \ (C' \ (w .* y));
         w = p * (y > z) + (1 - p) * (y < z);
+    end
+
+end
+
+function z = baselinecalcARPLS(y, lambda)
+% Estimate baseline with asymmetrically reweighted penalized least squares
+
+    global maxiter
+    N = length(y);
+    D = diff(speye(N),2);
+    H = lambda * (D' * D);
+    w = ones(N,1);
+
+    for it = 1:maxiter
+        W = spdiags(w,0,N,N);
+        C = chol(W + H);
+        z = C \ (C' \ (w .* y));
+        d = y-z;
+        dn = d(d<0);
+        m = mean(dn);
+        s = std(dn);
+        w = 1 ./ ( 1 + exp( 2 * (d-(2*s-m))/s ) );
     end
 
 end

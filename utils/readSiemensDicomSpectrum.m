@@ -53,9 +53,38 @@ if nargout>2
     fid2 = fopen(txtname,'r');
     str1 = fgetl(fid2);
     nloop = 0;
-    while( ~isempty(str1) && isempty( strfind(str1,'ASCCONV END') ) )
+    while( ~isempty(str1) &&  ~contains(str1,'ASCCONV END')  )
         str1 = fgetl(fid2);
         nloop = nloop+1;
+
+        tnamestr = 'tSequenceFileName';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'""')+2;
+            tindex2 = length(str1)-2;
+            tname = str1(tindex1(1):tindex2);
+            hdr.SeqName = tname;
+        end
+
+        tnamestr = 'sProtConsistencyInfo.tBaselineString';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'""')+2;
+            tindex2 = length(str1)-2;
+            tname = str1(tindex1(1):tindex2);
+            hdr.swversion = tname;
+        end
+
+        tnamestr = 'sProtConsistencyInfo.tMeasuredBaselineString'; % NW added 11/07/16
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'""')+2;
+            tindex2 = length(str1)-2;
+            tname = str1(tindex1(1):tindex2);
+            if isfield(hdr,'swversion') % already exists
+                warning('multiple definitions of software version')
+                disp(hdr.swversion)
+                disp(tname)
+            end
+            hdr.swversion = tname;
+        end
         
         tnamestr = 'sRXSPEC.alDwellTime[0]';
         if (~isempty(strfind(str1,tnamestr)))
@@ -168,14 +197,28 @@ if nargout>2
         if (contains(str1,tnamestr))
             tindex1 = strfind(str1,'=')+1;
             tname = str1(tindex1:numel(str1));
-            hdr.flipAngle = (sscanf(tname,'%i',1));
+            hdr.flipAngle = (sscanf(tname,'%f',1));
+        end
+
+        tnamestr = 'alTE[0]';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.TEus = (sscanf(tname,'%i',1));
+        end
+
+        tnamestr = 'alTR[0]';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.TRus = (sscanf(tname,'%i',1));
         end
 
         tnamestr = 'sTXSPEC.asNucleusInfo[0].flReferenceAmplitude';
         if (contains(str1,tnamestr))
             tindex1 = strfind(str1,'=')+1;
             tname = str1(tindex1:numel(str1));
-            hdr.refVolt = (sscanf(tname,'%i',1));
+            hdr.refVolt = (sscanf(tname,'%f',1));
         end
 
         tnamestr = 'sTXSPEC.asNucleusInfo[0].tNucleus';
@@ -197,7 +240,63 @@ if nargout>2
             end
         end
 
+        tnamestr = 'sSliceArray.asSlice[0].dThickness';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.slthk = (sscanf(tname,'%f',1)); 
+        end
         
+        tnamestr = 'sSliceArray.asSlice[0].dPhaseFOV';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.phfov = (sscanf(tname,'%f',1)); 
+        end
+
+        tnamestr = 'sSliceArray.asSlice[0].dReadoutFOV';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.rdfov = (sscanf(tname,'%f',1)); 
+        end
+
+        tnamestr = 'sSliceArray.asSlice[0].sPosition.dSag';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.posSag = (sscanf(tname,'%f',1)); 
+        end
+
+        tnamestr = 'sSliceArray.asSlice[0].sPosition.dCor';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.posCor = (sscanf(tname,'%f',1)); 
+        end
+        
+        tnamestr = 'sSliceArray.asSlice[0].sPosition.dTra';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.posTra = (sscanf(tname,'%f',1)); 
+        end
+
+        tnamestr = 'sSliceArray.asSlice[0].dInPlaneRot'; % does not appear in Siemens spectroscopy dicom so we use the one below this
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.rot = (sscanf(tname,'%f',1));
+        end
+
+        tnamestr = 'sAAInitialOffset.SliceInformation.dInPlaneRot';
+        if (contains(str1,tnamestr))
+            tindex1 = strfind(str1,'=')+1;
+            tname = str1(tindex1:numel(str1));
+            hdr.rot = (sscanf(tname,'%f',1));
+        end
+
+
     end  % While ASCCONV
     fclose(fid2);
     if isfield(hdr,'removeOS') % NW
