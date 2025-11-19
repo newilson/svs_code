@@ -75,7 +75,7 @@ te2 = uicontrol('Parent',f,'style','text','units','normalized','position',[.84 .
     'string','Max','HorizontalAlignment','right','fontweight','bold');
 
 s2 = uicontrol('Parent',f,'Style','slider','units','normalized','Position',[.1 .15 .45 .05],...
-        'value',-2,'min',-5,'max',3,...
+        'value',-2,'min',-5,'max',-0.1,...
         'sliderstep',[0.1 0.5]/8,'callback',@updatePsl);
     
 s3 = uicontrol('Parent',f,'Style','slider','units','normalized','Position',[.1 .05 .45 .05],...
@@ -463,7 +463,31 @@ set(f,'visible','on','toolbar','figure')
     end
 
     function save_var(source,callbackdata)
-        assignin('caller','out',spec);
+        val = pop0.Value;
+        output.spec = spec;
+        output.base = spec_orig - spec;
+        if val==1
+            output.method = 'none';
+        elseif val==2
+            output.method = 'ALS';
+            output.pars.logP = str2double(get(e3,'string'));
+            output.pars.logL = str2double(get(e4,'string'));
+        elseif val==3
+            output.method = 'arPLS';
+            output.pars.logL = str2double(get(e4,'string'));
+        elseif val==4
+            output.method = 'BA';
+            regval = pop1.Value;
+            regstr = pop1.String;
+            output.pars.regmeth = regstr{regval};
+            estval = pop2.Value;
+            eststr = pop2.String;
+            output.pars.estmeth = eststr{estval};
+            output.pars.stepsize = s4.Value;
+            output.pars.winsize = s5.Value;
+            output.pars.quantile = str2double(e7.String);
+        end
+        assignin('caller','out',output);
     end
 
     function printax(source,callbackdata)

@@ -31,8 +31,8 @@ if nargin<3 || isempty(minw)
     minw = 0;
 end
 
-if (nargin < 4)
-    mode = 1;
+if nargin < 4 || isempty(mode)
+    mode = 5; % complex Voigt
 end
 
 if (nargin < 6)
@@ -40,17 +40,13 @@ if (nargin < 6)
     maxy = max(y);
 end
 
-% Use n peaks - work in ppm units
-% cg = zeros(n,1);
-% wg = cg;
-% ag = cg;
-
 
 cfh = figure;
 h1 = plot(x,y,'b-'); axis([min(x) max(x) miny maxy]);
 hold on;
 yres = y;
 h2 = plot(x,yres,'r-');
+set(gca,'Xdir','reverse');
 
 BW = abs(x(end)-x(1));
 dwelltime = 1/BW;

@@ -17,18 +17,24 @@ pars.plt = true;
 % USE ONLY MANUAL FITTING FOR NOW
 pars.dofit = 'man'; % false: no fit, 'man': semi-manual fit, 'auto': auto fit, 'lcmodel': writes RDA files for LCmodel fitting
 pars.fit.mode = 5; % 1: gaussian, 2: lorentzian, 3: complex Lorentzian, 4: complex Gaussian, 5: complex Voigt
-pars.fit.peaks = {'NADH6','NADH4','NADH2'};
+pars.fit.peaks = {'NADH2','NADH6','NADH4'};
 pars.fit.ph_range = [-35 35];
 pars.fit.ppm_range = [8.7 9.5];
 
 if use_nws
-    [twixOut,pars,hdr] = dat2mat_svsNAD(pars,[mainDir filesep ws_dat],[mainDir filesep nws_dat]);
+    [output,pars,hdr] = dat2mat_svsNAD(pars,[mainDir filesep ws_dat],[mainDir filesep nws_dat]);
 else
-    [twixOut,pars,hdr] = dat2mat_svsNAD(pars,[mainDir filesep ws_dat],[]);
+    [output,pars,hdr] = dat2mat_svsNAD(pars,[mainDir filesep ws_dat],[]);
 end
 % figure, plot(twixOut.ppm,real(twixOut.met.spec),'-r'), set(gca,'xdir','reverse'), title('Twix')
 % axis tight
 
 % saving
 outName = [ws_dat(1:end-4) '.mat'];
-save(outName,'twixOut','pars','hdr');
+save(outName,'output','pars','hdr');
+
+% csv file
+csvName = [ws_dat(1:end-4) 'fit_results.csv'];
+T = table([output.wat.fit.pars(2); output.wat.fit.areas],[output.met.fit.pars(4:6); output.met.fit.areas],'RowNames',{'ppm','area'},'VariableNames',{'Wat','NAD'});
+T.Properties.DimensionNames = {'Var', 'Variables'};
+writetable(T,csvName,'WriteRowNames',true,'WriteVariableNames',true);

@@ -158,6 +158,13 @@ end
 nave = ws_obj.image.NAve * ws_obj.image.NSet; % cmrr uses 'sets' for 'avgs'
 
 seqname = ws_obj.hdr.MeasYaps.tSequenceFileName;
+examMemoryUID = ws_obj.hdr.Config.ExamMemoryUID;
+fparts = split(examMemoryUID,'_');
+for ii=1:length(fparts)
+    if length(fparts{ii})==8 & strcmp(fparts{ii}(1:3),'202')
+        scandate = datetime(fparts{ii},'InputFormat','yyyyMMdd');
+    end
+end
 bw = 1e9/ws_obj.hdr.Config.DwellTimeSig;
 f0 = 1e-6*ws_obj.hdr.Config.Frequency;
 nch = ws_obj.image.NCha;
@@ -203,7 +210,11 @@ t = (0:vectorSize-1)*1/bw;
 % freq axis
 hz = (-1/2:1/vectorSize:1/2-1/vectorSize)*bw;
 if contains(seqname,'svssel_latest') && ~contains(seqname,'svssel_latest0')  % older versions up to svssel_latest021224 do not include this
-    center_freq = wipdbl(4);
+    if scandate < datetime('20240212','InputFormat','yyyyMMdd')
+        center_freq = 4.72;
+    else
+        center_freq = wipdbl(4);
+    end
 else
     center_freq = 4.72;
 end
@@ -292,7 +303,7 @@ else
     [weights, ws, nws] = coilCombinationNoPC(nws,pars.ccopt.minsig_frac,ws);
 end
 if pars.plt
-    figure, plot(weights,'*'), title('coil weights')
+    % figure, plot(weights,'*'), title('coil weights')
 end
 
 
@@ -420,9 +431,11 @@ if isfield(pars,'base') && strcmpi(pars.base,'full')
     f = NWsemiman_base(ws,ppm,'Semi manual baseline correction: save and close when done');
     waitfor(f);
     if exist('out','var')
-        output.met.baseline = ws - out;
-        ws = out; clear out
+        output.met.baseline = ws - out.spec;
+        ws = out.spec;
         pars.flag.baseCorr = true;
+        pars.base = out.pars;
+        clear out
     end
 end
 
@@ -486,10 +499,11 @@ if pars.dofit
             f = NWsemiman_base(y,x,'Semi manual baseline correction: save and close when done');
             waitfor(f);
             if exist('out','var')
-                output.met.fit.baseline = y - out;
-                y = out;
-                clear out
+                output.met.fit.baseline = y - out.spec;
+                y = out.spec;
                 pars.flag.baseCorr = true;
+                pars.base = out.pars;
+                clear out
             end
         end
 
@@ -508,12 +522,15 @@ if pars.dofit
         output.met.fit.areas = areas;
         output.met.fit.ppm = x;
 
-        % water fit
+        % water fit - automatic
         if ~isempty(nws)
-            inds = find( ppm > 3.7 & ppm < 5.7 );
-            x = ppm(inds);
-            y = double(real(nws(inds)));
-            [yfit,~,areas,ip] = curvefitMan(x,y,minw,pars.fit.mode,{'wat'});
+            % inds = find( ppm > 3.7 & ppm < 5.7 );
+            % x = ppm(inds);
+            % y = double(real(nws(inds)));
+            % [yfit,~,areas,ip] = curvefitMan(x,y,minw,pars.fit.mode,{'wat'});
+            x = ppm;
+            y = double(real(nws));
+            [yfit,areas,ip] = curvefitWat(x,y,minw,pars.fit.mode);
             output.wat.fit.spec = y;
             output.wat.fit.ppm = x;
             output.wat.fit.spec_fit = yfit;

@@ -1,6 +1,5 @@
-% function [yfit,n,names,ampl,pos,width,integral,ip,pars] = curvefitAuto(x,y,minw,mode,peak,ag0,cg0,wg0, ph_range)
-function [yfit,names,areas,ip,pars,lb,ub] = curvefitAuto(x,y,minw,mode,peak,amp0,center0,width0, ph_range)
-
+function [yfit,areas,ip,pars,lb,ub] = curvefitWat(x,y,minw,mode)
+% water spectrum should be mostly phase corrected already
 
 %[yfit,ampl,pos,width,integral, pars, n] =
 %curvefit(x,y,minw,n,mode,miny,maxy)
@@ -31,160 +30,123 @@ if (nargin < 4) || isempty(mode)
     mode = 5; % complex Voigt
 end
 
-yres = y;
-
-BW = abs(x(end)-x(1));
-dwelltime = 1/BW;
-% global time
-time = col(dwelltime*(0:length(x)-1));
-
-names = [];
-
 % Initial guesses
-if nargin<8 || isempty(amp0) || isempty(center0) || isempty(width0)
-    [~,center,width,amp] = findpeaks(y,x);
-    figure, plot(x,y,'-k',center,amp,'*r')
-    n = length(center);
-else
-    amp = amp0;
-    center = center0;
-    width = width0;
-end
+[amp0, indC] = max(y);
+[~,indW] = min(abs(y - max(y)/2 )); % HWHM
+center0 = x(indC(1));
+width0 = 2 * abs( x(indW(1))-center0 ); % FWHM
 
-centermax = center+width/2;
-centermin = center-width/2;
+centermax = center0 + width0/2;
+centermin = center0 - width0/2;
 
-amin = 0.2 * amp; %ag is the y-point chosen by user; search 20% of this value
-amax = 1.2 * amp; % NW
+amin = 0.9 * amp0;
+amax = 1.2 * amp0;
 
-pars( 1:n ) = amp;
-lb(1:n) = amin;
-ub(1:n) = amax;
+pars(1) = amp0;
+lb(1) = amin;
+ub(1) = amax;
 
-pars( n + (1:n) ) = center;
-lb( n + (1:n) ) = centermin;
-ub( n + (1:n) ) = centermax;
+pars(2) = center0;
+lb(2) = centermin;
+ub(2) = centermax;
+
 
 if mode==5 % complex Voigt
-    widthmin = 1e-6*width;
-    widthmax = 2*width;
+    widthmin = 1e-6*width0;
+    widthmax = 2*width0;
 
     % Olivero–Longbothum approximation
     Acoef = 0.5346; Bcoef = 0.2166;
-    widthL = 0.4 * width;
+    widthL = 0.4 * width0;
 
-    term = (width - Acoef*widthL).^2 - Bcoef*(widthL.^2);
+    term = (width0 - Acoef*widthL).^2 - Bcoef*(widthL.^2);
     widthG = sqrt(max(0, term));
 
-    pars( 2*n  + (1:n) ) = widthL;
-    lb( 2*n + (1:n) ) = widthmin;
-    ub( 2*n + (1:n) ) = widthmax;
+    pars(3) = widthL;
+    lb(3) = widthmin;
+    ub(3) = widthmax;
 
-    pars( 4*n  + (1:n) ) = widthG;
-    lb( 4*n + (1:n) ) = widthmin;
-    ub( 4*n + (1:n) ) = widthmax;
+    pars(5) = widthG;
+    lb(5) = widthmin;
+    ub(5) = widthmax;
 else
-    widthmin = 0.5*width;
-    widthmax = 2*width;
-    for k = 1:n
-        if (widthmin(k) < minw)
-            widthmin(k) = minw;
-        end
+    widthmin = 0.5*width0;
+    widthmax = 2*width0;
+    if (widthmin < minw)
+        widthmin = minw;
     end
 
-    pars( n + n  + (1:n) ) = width;
-    lb( n + n + (1:n) ) = widthmin;
-    ub( n + n + (1:n) ) = widthmax;
+    pars(3) = width0;
+    lb(3) = widthmin;
+    ub(3) = widthmax;
 end
-
 
 % NW
 if mode>2
-    if nargin<9 || isempty(ph_range) || length(ph_range)~=2
-        pars(3*n + (1:n)) = 0; % phase
-        lb(3*n+(1:n)) = -179; % degrees
-        ub(3*n+(1:n)) = 179;
-    else
-        pars(3*n + (1:n)) = mean(ph_range);
-        lb(3*n+(1:n)) = min(ph_range);
-        ub(3*n+(1:n)) = max(ph_range);
-    end
+    pars(4) = 0; % phase
+    lb(4) = -15; % degrees
+    ub(4) = 15;
 end
 
 %%
 if size(x)==size(y'), y = y'; end
 
-spins = ones(n,1); % NW fix this later
 oldoptions = optimset('lsqcurvefit');
-options = optimset(oldoptions, 'TolFun', 1e-12,'TolX', 1e-12,'MaxFunEval',20000*n,'MaxIter', 12000 );
+options = optimset(oldoptions, 'TolFun', 1e-12,'TolX', 1e-12,'MaxFunEval',20000,'MaxIter', 12000 );
 
 if (mode == 1) % Gaussian
 
     ip = lsqcurvefit(@composite,pars,x,y,lb,ub,options);
-    ampl = abs(ip(1:n));
-    pos = ip( (1:n) + n);
-    width = abs(ip( (1:n) + n + n));
-    yfit = x*0;
-    for k = 1:n
-        a = abs( ip(k) );
-        p = ip(k+n);
-        w = abs( ip(k+n+n) );
-        xpw = (x-p)/w;
-        yfit = yfit + a * exp( -( (xpw/0.6006).^2 ) ); % 0.6006 = 0.5/(sqrt(ln(2.0)))
-        areas(k) = a * w * 1.37362;  % Analytical form of gaussian integral- a*w*sqrt(2pi*0.3003)
-    end
+    ampl = abs(ip(1));
+    pos = ip(2);
+    width = abs(ip(3));
+    xpw = (x-pos)/width;
+    yfit = ampl * exp( -( (xpw/0.6006).^2 ) ); % 0.6006 = 0.5/(sqrt(ln(2.0)))
+    areas = ampl * width * 1.37362;  % Analytical form of gaussian integral- a*w*sqrt(2pi*0.3003)
 
 elseif mode==2 % Lorentzian
 
     ip = lsqcurvefit(@compositel,pars,x,y,lb,ub,options);
-    ampl = abs(ip(1:n));
-    pos = ip( (1:n) + n);
-    width = abs(ip( (1:n) + n + n));
-    yfit = x*0;
-    for k = 1:n
-        a = abs( ip(k) );
-        p = ip(k+n);
-        w = abs( ip(k+n+n) );
-        xpw = (x-p)/w;
-        yfit = yfit + a ./ ( (4.0*(xpw .*xpw)) + 1.0 );
-        areas(k) = a * w * 1.5708;  % Analytical form of lorentzian integral- a*w*pi/2
-    end
+    ampl = abs(ip(1));
+    pos = ip(2);
+    width = abs(ip(3));
+    xpw = (x-pos)/width;
+    yfit = ampl ./ ( (4.0*(xpw .*xpw)) + 1.0 );
+    areas = ampl * width * 1.5708;  % Analytical form of lorentzian integral- a*w*pi/2
 
 elseif mode==3 % complex Lorentzian - NW
 
     ip = lsqcurvefit(@compositel_complex,pars,x,y,lb,ub,options);
-    ampl = abs(ip(1:n));
-    pos = ip( (1:n) + n);
-    width = abs(ip( (1:n) + n + n));
-    phase = ip((1:n)+3*n);
+    ampl = abs(ip(1));
+    pos = ip(2);
+    width = abs(ip(3));
+    phase = ip(4);
     yfit = compositel_complex(ip,x);
     areas = ampl .* width * pi/2; % same as real Lorentzian
 
 elseif mode==4 % complex Gaussian - NW
 
     ip = lsqcurvefit(@compositeG_complex,pars,x,y,lb,ub,options);
-    ampl = abs(ip(1:n));
-    pos = ip((1:n)+n);
-    width = abs(ip((1:n)+2*n));
-    phase = ip((1:n)+3*n);
+    ampl = abs(ip(1));
+    pos = ip(2);
+    width = abs(ip(3));
+    phase = ip(4);
     yfit = compositeG_complex(ip,x);
     areas = ampl .* width * 1.37362; % same as real Gaussian
 
 elseif mode==5 % complex Voigt - NW
 
     ip = lsqcurvefit(@compositeV_complex,pars,x,y,lb,ub,options);
-    ampl = abs(ip(1:n));
-    pos = ip((1:n)+n);
-    widthL = abs(ip((1:n)+2*n));
-    phase = ip((1:n)+3*n);
-    widthG = abs(ip((1:n)+4*n));
+    ampl = abs(ip(1));
+    pos = ip(2);
+    widthL = abs(ip(3));
+    phase = ip(4);
+    widthG = abs(ip(5));
     width = Acoef * widthL + sqrt(Bcoef*widthL.^2 + widthG.^2);     % Olivero–Longbothum approximation
     yfit = compositeV_complex(ip,x);
-    for ii=1:n % evaluate each peak with 0 phase and integrate
-        temppars = [ampl(ii) pos(ii) widthL(ii) 0 widthG(ii)];
-        peakfit = compositeV_complex(temppars,x);
-        areas(ii) = sum(peakfit(:));
-    end
+    temppars = [ampl pos widthL 0 widthG];
+    peakfit = compositeV_complex(temppars,x);
+    areas = sum(peakfit(:));
 
 end
 
