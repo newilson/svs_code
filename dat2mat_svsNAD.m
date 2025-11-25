@@ -210,7 +210,7 @@ t = (0:vectorSize-1)*1/bw;
 % freq axis
 hz = (-1/2:1/vectorSize:1/2-1/vectorSize)*bw;
 if contains(seqname,'svssel_latest') && ~contains(seqname,'svssel_latest0')  % older versions up to svssel_latest021224 do not include this
-    if scandate < datetime('20240212','InputFormat','yyyyMMdd')
+    if length(wipdbl)<10 % scandate < datetime('20240212','InputFormat','yyyyMMdd') % this date needs to be confirmed
         center_freq = 4.72;
     else
         center_freq = wipdbl(4);

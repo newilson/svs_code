@@ -38,3 +38,34 @@ csvName = [ws_dat(1:end-4) 'fit_results.csv'];
 T = table([output.wat.fit.pars(2); output.wat.fit.areas],[output.met.fit.pars(4:6); output.met.fit.areas],'RowNames',{'ppm','area'},'VariableNames',{'Wat','NAD'});
 T.Properties.DimensionNames = {'Var', 'Variables'};
 writetable(T,csvName,'WriteRowNames',true,'WriteVariableNames',true);
+
+%% 
+clear,clc
+
+pars.lb = 3;
+pars.eccopt = -1; % -1: Brown, 0: Klose ECC
+pars.PC = 0; % []: manual phase correction (make sure to 'SAVE' and close figure when done), 1x1 value: constant phase correction (radians), 2x1: [ph0 pc1] use pars.PCpivot to control pivot point
+pars.base = nan; % nan: no baseline correction, 'full': semi-manual correction on full spectrum, 'fit': semi-manual correction on fitted range only (make sure to 'SAVE' and close figure when done)
+pars.plt = true;
+pars.dofit = false;
+
+
+scan = 20.2;
+switch scan 
+    case 10.1
+        ws_dat = 'C:\Users\CAMIPM-NW\Downloads\datain\datain\854430_S010_02082024\datfiles\854430_S010_02082024_meas_MID01655_FID95761_svssel_NAD_TR1000ms_512avg.dat';
+        nws_dat = 'C:\Users\CAMIPM-NW\Downloads\datain\datain\854430_S010_02082024\datfiles\854430_S010_02082024_meas_MID01654_FID95760_svssel_WATEREF.dat';
+
+    case 10.2
+        ws_dat = 'C:\Users\CAMIPM-NW\Downloads\datain\datain\854430_S010_02132024\datfiles\854430_S010_02132024_meas_MID02144_FID96293_svssel_NAD_TR1000ms_512avg.dat';
+        nws_dat = 'C:\Users\CAMIPM-NW\Downloads\datain\datain\854430_S010_02132024\datfiles\854430_S010_02132024_meas_MID02143_FID96292_svssel_WATEREF.dat';
+
+    case 20.2
+        ws_dat = 'C:\Users\CAMIPM-NW\Downloads\datain\datain\854430_S020_07262024\datfiles\854430_S020_07262024_meas_MID02075_FID14271_svssel_NAD_TR1000ms_512avg.dat';
+        nws_dat = 'C:\Users\CAMIPM-NW\Downloads\datain\datain\854430_S020_07262024\datfiles\854430_S020_07262024_meas_MID02074_FID14270_svssel_WATEREF.dat';
+
+end
+
+
+[output,pars,hdr] = dat2mat_svsNAD(pars,ws_dat,nws_dat);
+figure, plot(output.ppm, real(output.met.spec)); set(gca,'xdir','reverse'), title(num2str(scan))
