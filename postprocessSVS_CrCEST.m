@@ -115,31 +115,34 @@ switch pars.fitmode
     case 1.5 % findpeaks
         spec = abs(fftshift(fft(fid,[],1),1));
         inds = abs(ppm) < 1; % restricted range from 3.7-5.7 ppm
-        sig = zeros(1,size(spec,2));
-        for jj=1:size(spec,2);
+        sig = zeros(1,size(spec,2)); width = 0*sig;
+        for jj=1:size(spec,2)
             tempspec = spec(:,jj);
             [~,loc,width,prom] = findpeaks(tempspec(inds),SortStr="descend",NPeaks=1);
             sig(jj) = width * prom;
+            width(jj) = width;
         end
 
     case 2 % hsvd
         rangeHz = f0 * [-0.15 0.15]; % +/- 0.15 ppm range
         do_svds = false;
-        sig = zeros(1,size(fid,2));
+        sig = zeros(1,size(fid,2)); width = 0*sig;
         for jj=1:size(fid,2)
             tempfid = fid(:,jj);
             [freqHz, damp, amp, y_comp, y_fit,lambda] = hsvd_fit(t,tempfid,30,[],rangeHz,do_svds);
             sig(jj) = abs(y_fit(1));
+            width(jj) = abs(1/damp);
         end
 
     case 2.1 % hsvd - 1 peak only
         rangeHz = f0 * [-0.15 0.15]; % +/- 0.15 ppm range
         do_svds = true;
-        sig = zeros(1,size(fid,2));
+        sig = zeros(1,size(fid,2)); width = 0*sig;
         for jj=1:size(fid,2)
             tempfid = fid(:,jj);
             [freqHz, damp, amp, y_comp, y_fit,lambda] = hsvd_fit(t,tempfid,1,[],rangeHz,do_svds);
             sig(jj) = abs(y_fit(1));
+            width(jj) = abs(1/damp);
         end
         
     case 3 % 1 peak Lorentzian - frequency domain 
@@ -155,7 +158,7 @@ if length(ppmlist)==1
         neg = sig(2:2:end);
     else
         pos = sig(2:2:end);
-        neg = sig(2:2:end);
+        neg = sig(1:2:end);
     end
 else
     warning('not yet implemented')
@@ -175,6 +178,9 @@ output.CrCEST = mtr;
 output.pars = pars;
 output.ppm = ppm;
 output.time = t;
+if exist('width','var')
+    output.width = width;
+end
 
 rmpath([thisPath filesep 'utils']);
 
