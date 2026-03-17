@@ -27,14 +27,25 @@ for zz=1:ncad
     % get new H
     H = U*S*V';
     
-    % average antidiagonals of H to keep Hankel structure    
-    H2 = fliplr(H);
-    for ii=-(nrow-1):ncol-1
-        vec = diag(H2,ii);
-        avg = mean(vec);
-        H2 = H2 + diag(avg - vec,ii);
+    % average antidiagonals of H to keep Hankel structure  
+    % H2 = fliplr(H);
+    % for ii=-(nrow-1):ncol-1
+    %     vec = diag(H2,ii);
+    %     avg = mean(vec);
+    %     H2 = H2 + diag(avg - vec,ii);
+    % end
+    % H = fliplr(H2); % flip back
+
+    % average antidiagonals to enforce Hankel structure - much faster
+    for kk = 1:npts
+        % indices along anti-diagonal kk (corresponding to fid(kk))
+        jmin = max(1, kk - nrow + 1);
+        jmax = min(kk, ncol);
+        cols = jmin:jmax;
+        rows = kk - cols + 1;
+        linidx = sub2ind([nrow ncol], rows, cols);
+        H(linidx) = mean(H(linidx));
     end
-    H = fliplr(H2); % flip back
 end
         
 % get back fid
