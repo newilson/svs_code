@@ -1,7 +1,8 @@
-function f = NWman_phase(spec,ax_vals,fig_title,spec_ref,ref_ax)
+function f = NWman_phase(spec,ax_vals,fig_title,pivot0,spec_ref,ref_ax)
 
-if nargin<4, spec_ref = []; end
-if nargin<5 && ~isempty(spec_ref), ref_ax = ax_vals; end
+if nargin<4 || isempty(pivot0), pivot0 = ax_vals(end/2+1); end
+if nargin<5, spec_ref = []; end
+if nargin<6 && ~isempty(spec_ref), ref_ax = ax_vals; end
 
 spec_orig = spec;
 
@@ -102,7 +103,7 @@ te5 = uicontrol('Parent',f,'style','text','units','normalized','position',[.1 .9
 
 e5 = uicontrol('Parent',f,'style','edit','units','normalized','position',[.15 .93 .1 .05],...
     'callback',@updatePCpiv);
-set(e5,'string',num2str(ax_vals(end/2+1)));
+set(e5,'string',num2str(pivot0));
 
 b3 = uicontrol('Parent',f,'style','pushbutton','units','normalized','position',[.5 .93 .1 .05],...
     'callback',@save_var,'string','Save','fontweight','bold');
