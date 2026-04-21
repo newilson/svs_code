@@ -4,7 +4,7 @@ function fid = removeMetSignal(fid,freqShiftHz,time,WSopts)
 % fid must be [npts x whatever]
 % freqShiftHz is the metabolite frequency in Hz relative to water
 % time is the time values for the fid
-% WSopts are options to remove residual water. See removeResidualWater.metabolite
+% WSopts are options to remove residual water. See removeResidualWater.m
 
 
 if ~isequal(length(time),size(fid,1))

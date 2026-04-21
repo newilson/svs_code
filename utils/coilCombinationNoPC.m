@@ -6,7 +6,7 @@ function [weights, fidcc, fid_refcc] = coilCombinationNoPC(fid_ref,min_sig_frac,
 % fid is [npts x nc x other stuff]
 
 if nargin<2 || isempty(min_sig_frac)
-    min_sig_frac = 0.15;
+    min_sig_frac = 0.015;
 end
 
 sig = fid_ref(1,:) .* conj(fid_ref(1,:));
