@@ -1,4 +1,4 @@
-function [freq_Hz, damp_Hz, amp, y_comp, y_fit, lambda] = hsvd_fit(t, y, K, lambda, rangeHz, do_svds)
+function [freq_Hz, damp_Hz, amp, y_comp, y_fit, lambda, phase_rad] = hsvd_fit(t, y, K, lambda, rangeHz, do_svds, excludeHz)
 % HSVDFIT  HSVD decomposition of an NMR/FID signal with ridge (Tikhonov) LS
 %
 % Inputs
@@ -7,16 +7,20 @@ function [freq_Hz, damp_Hz, amp, y_comp, y_fit, lambda] = hsvd_fit(t, y, K, lamb
 %   K        : number of damped sinusoids to retain over the entire range
 %   lambda   : (optional) Tikhonov parameter (>=0). If omitted or empty,
 %              a small heuristic based on svd(U1) is used.
-%   rangeHz  : prune all frequencies outside this range
+%   rangeHz  : prune all frequencies outside this range (inclusion)
 %   do_svds  : use the svds algorithm else use svd( ,'econ')
+%   excludeHz: [1x2] frequency range (Hz) to exclude (notch). Components
+%              inside this range are removed. Can be used alone or combined
+%              with rangeHz (inclusion is applied first, then exclusion).
 %
 % Outputs
 %   freq_Hz    : K×1 frequencies (Hz)
 %   damp_Hz    : K×1 damping factors (1/s, positive = decaying)
 %   amp        : K×1 complex amplitudes
-%   phase_rad  : K×1 initial phases (rad)
 %   y_fit      : Nx1 complex FID reconstructed from the K sinusoids
 %   lambda     : scalar lambda actually used
+%   phase_rad  : K×1 initial phases (rad)
+
 %
 % Example
 %   [f,d,a,p,fit,lam] = hsvd_fit(t, y, 30);
@@ -71,11 +75,23 @@ lnz     = log(z);          % ln z = (−d + j2πf)·dt
 damp_Hz = -real(lnz) / dt;   % keep original units convention
 freq_Hz =  imag(lnz) / (2*pi*dt);
 
-% --- 4B. Prune frequency range
+% --- 4B. Prune frequency range (inclusion)
 if ~isempty(rangeHz)
     inds = find( freq_Hz > min(rangeHz) & freq_Hz < max(rangeHz) );
     if isempty(inds)
         warning('In HSVD_FIT.m : There are no peaks in the prescribed frequency range')
+    end
+    lnz = lnz(inds);
+    freq_Hz = freq_Hz(inds);
+    damp_Hz = damp_Hz(inds);
+    K = numel(lnz);
+end
+
+% --- 4C. Exclude frequency range (notch)
+if nargin >= 7 && ~isempty(excludeHz)
+    inds = find( freq_Hz < min(excludeHz) | freq_Hz > max(excludeHz) );
+    if isempty(inds)
+        warning('In HSVD_FIT.m : All peaks fall within the exclusion range')
     end
     lnz = lnz(inds);
     freq_Hz = freq_Hz(inds);
