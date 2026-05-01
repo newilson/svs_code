@@ -350,15 +350,20 @@ if strcmp(pars.den,'mlsvdPre')
     addpath('..\tensorlab_2016-03-28');
     if isfield(pars.den,'MLSingularValues')
         [Ufull,Sfull,Vfull] = mlsvd(ws);
+        sv = min(pars.den.MLSingularValues(:).', size(Sfull));
+        Ut = cell(1,numel(Ufull));
         for ii=1:length(Ufull)
-            Ut{ii} = Ufull{ii}(1:pars.mlsvd.singularValues(ii));
+            Ut{ii} = Ufull{ii}(:,1:sv(ii));
         end
-        idx = arrayfun(@(k) 1:size_core(k), 1:numel(size_core), 'UniformOutput', false);
+        idx = arrayfun(@(k) 1:sv(k), 1:numel(sv), 'UniformOutput', false);
         St  = Sfull(idx{:});     % equivalent to Sfull(1:n1, 1:n2, ..., 1:nN)
         ws = lmlragen(Ut,St);
+        clear Ut St Ufull Sfull
     else % automatic rank estimation
-        [~,~,~,~,Ut,St] = mlsvd_wRankEstNW(ws);
+        [~,~,~,size_core,Ut,St] = mlsvd_wRankEstNW(ws);
         ws = lmlragen(Ut,St);
+        pars.den.MLSingularValues = size_core;
+        clear Ut St
     end
     rmpath('..\tensorlab_2016-03-28');
 end

@@ -36,6 +36,9 @@ if ~isfield(pars.hsvd,'cad'), pars.hsvd.cad = 3; end % HSVD Cadzow iterations
 if ~isfield(pars,'dofit'), pars.dofit = false; end
 if ~isfield(pars,'blp'), pars.blp.flag = false; end % backwards linear prediction for TE delay
 if ~isfield(pars.blp,'modelOrder'), pars.blp.modelOrder = 0; end % auto select
+if ~isfield(pars,'block_align') || ~isfield(pars.block_align,'size'),   pars.block_align.size = 64; end
+if ~isfield(pars,'block_align') || ~isfield(pars.block_align,'method'), pars.block_align.method = 'fd'; end % 'td' (fidfreqshift) or 'fd' (fidfreqshift_fd)
+if ~isfield(pars.block_align,'Nfit'),     pars.block_align.Nfit = 256; end       % TD: # FID points fit
 if pars.dofit
     if ~isfield(pars.fit,'mode'), pars.fit.mode = 2; end % complex Lorentzian
 end
@@ -116,14 +119,31 @@ ppm = hz/f0;
 adcshift = fullHdr.Phoenix.sSpecPara.dDeltaFrequency;
 ppm = ppm + adcshift;
 
-disp('block averaging')
-if isempty(pars.block_size)
-    pars.block_size = size(fid,2);
+if nave>1
+    disp('block averaging')
+    if isempty(pars.block_align.size)
+        pars.block_align.size = size(fid,avgDim); % defaults to 1 block consisting of all the averages
+    end
+    nd = ndims(fid);
+    if avgDim>2 % make avgDim 2nd
+        if avgDim==nd
+            fid = permute(fid,[1 avgDim 2:avgDim-1]);
+        else
+            fid = permute(fid,[1 avgDim 2:avgDim-1 avgDim+1:nd]);
+        end
+    end
+    fid = blockAverage(fid,pars.block_align.size); % average dimension MUST be 2nd in ws here
+    if avgDim>2 % put back in order
+        if avgDim==nd
+            fid = permute(fid,[1 avgDim 2:avgDim-1]);
+        else
+            fid = permute(fid,[1 avgDim 2:avgDim-1 avgDim+1:nd]);
+        end
+    end
 end
-fid = blockAverage(fid,pars.block_size);
 
 
-disp('denoising')
+disp('filtering')
 fid = expFilter(t,pars.lb,fid);
 
 if pars.hsvd.flag
@@ -138,15 +158,32 @@ if pars.hsvd.flag
     end
 end
 
+if pars.block_align.size < nave
+    disp('block alignment and resolve averages')
+    if isfield(pars.block_align,'saveDebug') && pars.block_align.saveDebug
+        output.met.blocks_pre = fid;  % FIDs before alignment, per block
+    end
+    switch lower(pars.block_align.method)
+        case 'fd'
+            fid = fidfreqshift_fd(t, fid, ppm, pars.block_align.ppmRange);
+        otherwise % 'td'
+            fid = fidfreqshift(t, fid, pars.block_align.Nfit, 0);
+    end
+    if isfield(pars.block_align,'saveDebug') && pars.block_align.saveDebug
+        output.met.blocks_post = fid; % FIDs after alignment, per block
+    end
+    fid = squeeze(mean(fid,2));
+end
 
-% output fid
+
+% output fid pre backwards linear prediction
 output.rawfid = fid;
 
 if pars.blp.flag
     % Correct for TE delay
     TEs = TEus * 1e-6;
     nPredict = round(TEs/(1/bw)); % points to backwards predict
-    fid = blp_fid(fidorig,nPredict,pars.blp.modelOrder);
+    fid = blp_fid(fid,nPredict,pars.blp.modelOrder);
 end
 
 
@@ -284,6 +321,168 @@ if pars.dofit
         fid = ifft(ifftshift(spec,1),[],1);
         create_lcmodelRAW(rawfile,fid,'NUNFIL',length(fid),'DELTAT',1/bw,'HZPPPM',f0);
 
+    elseif ischar(pars.fit.mode) && strcmpi(pars.fit.mode,'basisvarpro')
+
+        % ----------------------------------------------------------
+        % Basis-set varpro fit (LCModel/Osprey-style) in frequency
+        % domain via curvefitAuto_basisVarpro.
+        % ----------------------------------------------------------
+
+        % default metabolite subset = NAD/UDP region
+        if ~isfield(pars.fit,'metabs') || isempty(pars.fit.metabs)
+            pars.fit.metabs = {'aATP','NADH','NADplus', ...
+                               'UDPGal','UDPGlc','UDPGalNAc','UDPGlcNAc'};
+        end
+        if ~isfield(pars.fit,'ppm_range') || isempty(pars.fit.ppm_range)
+            pars.fit.ppm_range = [-10.5 -6.5];
+        end
+        if ~isfield(pars.fit,'phase1Enable') || isempty(pars.fit.phase1Enable)
+            pars.fit.phase1Enable = true;
+        end
+        if ~isfield(pars.fit,'softConstraints')
+            pars.fit.softConstraints = [];
+        end
+        if ~isfield(pars.fit,'tieGroups')
+            pars.fit.tieGroups = [];
+        end
+
+        % build basis FIDs at data length / dwell
+        [basisFIDs, basisInfo] = make31P_basisFIDs(t(:), f0, ...
+            'metabSubset', pars.fit.metabs, ...
+            'adcshift',    adcshift);
+
+        % fit input: prefer first-spectrum column for now
+        x = ppm(:);
+        y = double(spec(:,1));
+
+        % --- timing / fit options
+        % Anchor phi1's linear-phase ramp at whichever ppm we just used for
+        % zero-order phase correction (so phi0 per component only has to
+        % absorb small residuals, not the global phase).
+        if isfield(pars.fit,'ppmPivot') && ~isempty(pars.fit.ppmPivot)
+            ppmPivot = pars.fit.ppmPivot;
+        elseif ~isempty(pars.peaks)
+            ppmPivot = pars.peaks(1);
+        else
+            ppmPivot = 0;
+        end
+
+        timeInfo = struct( ...
+            'dwellTime', 1/bw, ...
+            'f0',        f0, ...
+            't',         t(:), ...
+            'ppmPivot',  ppmPivot);
+
+        fitOpt = struct();
+        fitOpt.fitRange       = pars.fit.ppm_range;
+        fitOpt.complex        = true;
+        fitOpt.phase1Enable   = pars.fit.phase1Enable;
+        fitOpt.phaseBounds    = [-30 30];     % narrow; global phase comes from peak-based PC
+        fitOpt.shiftBounds    = [-25 25];     % Hz, ~0.2 ppm at 7T
+        fitOpt.lbLInit        = 20;           % typical 7T 31P brain LW
+        fitOpt.lbLBounds      = [0 60];
+        fitOpt.lbGInit        = 5;
+        fitOpt.lbGBounds      = [0 30];
+        fitOpt.softConstraints = pars.fit.softConstraints;
+        fitOpt.tieGroups       = pars.fit.tieGroups;
+        if isfield(pars.fit,'verbose'), fitOpt.verbose = pars.fit.verbose; end
+
+        % allow user override of any fitOpt field via pars.fit.fitOpt
+        if isfield(pars.fit,'fitOpt') && isstruct(pars.fit.fitOpt)
+            fn = fieldnames(pars.fit.fitOpt);
+            for ii_fn = 1:numel(fn)
+                fitOpt.(fn{ii_fn}) = pars.fit.fitOpt.(fn{ii_fn});
+            end
+        end
+
+        % --- baseline options (gentle spline; main job is broad envelope)
+        baselineOpt = struct();
+        baselineOpt.enable      = true;
+        baselineOpt.style       = 'lcmodel';
+        baselineOpt.knotSpacing = 1.5;        % ppm
+        baselineOpt.lambda      = 1e-2;
+        if isfield(pars.fit,'baselineOpt') && isstruct(pars.fit.baselineOpt)
+            fn = fieldnames(pars.fit.baselineOpt);
+            for ii_fn = 1:numel(fn)
+                baselineOpt.(fn{ii_fn}) = pars.fit.baselineOpt.(fn{ii_fn});
+            end
+        end
+
+        % --- run the fit
+        outFit = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, ...
+            timeInfo, fitOpt, baselineOpt);
+
+        % --- report
+        % Displayed amplitudes are scaled by n (number of 31P nuclei) so
+        % that printed values are proportional to molecular concentration
+        % and comparable across species with different n.  Raw amplitudes
+        % remain in outFit.ampl(k).
+        nVec = ones(length(outFit.names),1);
+        if isfield(outFit,'basisInfo') && ~isempty(outFit.basisInfo)
+            for k = 1:min(numel(outFit.basisInfo), length(outFit.names))
+                if isfield(outFit.basisInfo(k),'n') && ~isempty(outFit.basisInfo(k).n) ...
+                        && ~isnan(outFit.basisInfo(k).n) && outFit.basisInfo(k).n > 0
+                    nVec(k) = outFit.basisInfo(k).n;
+                end
+            end
+        end
+        amplScaled = outFit.ampl ./ nVec;
+
+        fprintf('\n*** basisVarpro 31P fit (ampl_sc shown; raw in outFit.ampl) ***\n');
+        fprintf('    lbL_tot = basis lwHz (baked in) + fitted lbL; fwhmV_tot is the effective Voigt FWHM.\n');
+        for k = 1:length(outFit.names)
+            fprintf(['  %-12s amplSc= %-10.4g shift= %+5.2f Hz  ' ...
+                     'lbL_tot= %6.1f Hz (=%.0f+%.1f)  lbG= %5.1f Hz  fwhmV_tot= %6.1f Hz  phi0= %+6.1f deg\n'], ...
+                outFit.names{k}, amplScaled(k), outFit.pars.shift(k), ...
+                outFit.pars.lbL_total(k), outFit.pars.lwHzBasis(k), outFit.pars.lbL(k), ...
+                outFit.pars.lbG(k), outFit.pars.fwhmV_total(k), ...
+                outFit.pars.phase0(k));
+        end
+        if outFit.fitOpt.phase1Enable
+            fprintf('  global phi1 = %+5.2f deg/ppm\n', outFit.pars.phase1);
+        end
+
+        % --- totals (n-scaled, i.e., concentration-proportional)
+        nadNames = {'NADH','NADplus'};
+        udpNames = {'UDPGal','UDPGlc','UDPGalNAc','UDPGlcNAc'};
+        totalNAD = 0;  nadFound = {};
+        totalUDP = 0;  udpFound = {};
+        for k = 1:length(outFit.names)
+            if any(strcmp(outFit.names{k}, nadNames))
+                totalNAD = totalNAD + amplScaled(k);
+                nadFound{end+1} = outFit.names{k}; %#ok<AGROW>
+            elseif any(strcmp(outFit.names{k}, udpNames))
+                totalUDP = totalUDP + amplScaled(k);
+                udpFound{end+1} = outFit.names{k}; %#ok<AGROW>
+            end
+        end
+        fprintf('  -----\n');
+        if isempty(nadFound)
+            fprintf('  totalNAD     = (no NAD components in basis)\n');
+        else
+            fprintf('  totalNAD     = %.4g  (%s)\n', totalNAD, strjoin(nadFound,'+'));
+        end
+        if isempty(udpFound)
+            fprintf('  totalUDP     = (no UDP components in basis)\n');
+        else
+            fprintf('  totalUDP     = %.4g  (%s)\n', totalUDP, strjoin(udpFound,'+'));
+        end
+
+        outFit.amplScaled            = amplScaled;
+        outFit.nVec                  = nVec;
+        outFit.totals.NAD            = totalNAD;
+        outFit.totals.UDP            = totalUDP;
+        outFit.totals.NAD_components = nadFound;
+        outFit.totals.UDP_components = udpFound;
+
+        if pars.plt
+            [~,fname,~] = fileparts(dat_file);
+            plot_basisvarpro_31p(outFit, fname);
+            plot_basisSpectra_31p(outFit, fname);
+        end
+
+        output.basisVarproResults = outFit;
+
     elseif ischar(pars.fit.mode) && strcmpi(pars.fit.mode,'amares')
         
         % OXSA->AMARES
@@ -365,7 +564,7 @@ if pars.dofit
                     PK2.initialValues(iPK).amplitude = PCrAmp * 0.024; % ~24% of total UDP
                 elseif strncmp(pn,'UDPGcNAc',8)
                     PK2.initialValues(iPK).amplitude = PCrAmp * 0.030; % ~30% of total UDP
-                elseif strcmp(pn,'BroadPDE')
+                elseif strcmp(pn,'Broad10_5') || strcmp(pn,'Broad8_5') || strcmp(pn,'BroadMP')
                     PK2.initialValues(iPK).amplitude = PCrAmp * 0.03;
                 else
                     PK2.initialValues(iPK).amplitude = PCrAmp * 0.015;

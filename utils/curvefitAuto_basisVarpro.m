@@ -49,6 +49,20 @@ function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo,
 %                                     .idxB    - index or name of comp B
 %                                     .ratio   - target amp(A)/amp(B)
 %                                     .lambda  - penalty weight (>=0)
+%                  .tieGroups     - struct array of parameter-tying groups.
+%                                   Each entry shares one or more nonlinear
+%                                   parameters across listed members:
+%                                     .members - cell array of basis names
+%                                                or indices; first listed
+%                                                is the LEADER whose init
+%                                                value and bounds apply.
+%                                     .params  - cell of which params to
+%                                                tie: any of {'shift',
+%                                                'lbL','lbG','phi0'}.
+%                                   Only the leader's parameter is exposed
+%                                   to lsqnonlin; followers are aliased to
+%                                   it. Untied parameters remain free and
+%                                   independent.
 %                  .maxIter, .tolFun, .tolX, .verbose
 %   baselineOpt - spline baseline options (same as curvefitAuto_varproBaseline):
 %                  .enable, .knotSpacing, .lambda, .normalize, .amplUB,
@@ -252,29 +266,98 @@ end
 
 % ------------------------------------------------------------------- %
 % nonlinear parameter layout
-%   ip(1:nMet)              shift (Hz)
-%   ip(nMet+(1:nMet))       lbL   (Hz)
-%   ip(2*nMet+(1:nMet))     lbG   (Hz)
-%   ip(3*nMet+(1:nMet))     phi0  (deg)
-%   ip(4*nMet+1)  (opt)     phi1  (deg/ppm)
+%   ip_full layout (per-component, length 4*nMet [+1] if phi1):
+%     ip_full(1:nMet)              shift (Hz)
+%     ip_full(nMet+(1:nMet))       lbL   (Hz)
+%     ip_full(2*nMet+(1:nMet))     lbG   (Hz)
+%     ip_full(3*nMet+(1:nMet))     phi0  (deg)
+%     ip_full(4*nMet+1)  (opt)     phi1  (deg/ppm)
+%
+%   With tieGroups, lsqnonlin operates on a REDUCED vector ip_red where
+%   tied followers collapse onto their leader's slot.  Expansion is
+%   ip_full = ip_red(mapToFull).
 % ------------------------------------------------------------------- %
-pars0 = [fitOpt.shiftInit(:).'   fitOpt.lbLInit(:).'  fitOpt.lbGInit(:).'  fitOpt.phaseInit(:).'];
-lb    = [fitOpt.shiftBounds(:,1).' fitOpt.lbLBounds(:,1).' fitOpt.lbGBounds(:,1).' fitOpt.phaseBounds(:,1).'];
-ub    = [fitOpt.shiftBounds(:,2).' fitOpt.lbLBounds(:,2).' fitOpt.lbGBounds(:,2).' fitOpt.phaseBounds(:,2).'];
-
 parnames = {'shift(Hz)','lbL(Hz)','lbG(Hz)','phi0(deg)'};
 
+% per-component aliasing: each component k by default maps to its own
+% slot k.  tieGroups overwrite alias(member) <- leader for the relevant
+% parameter blocks, collapsing followers onto the leader.
+aliasShift = (1:nMet).';
+aliasLbL   = (1:nMet).';
+aliasLbG   = (1:nMet).';
+aliasPhi0  = (1:nMet).';
+
+if isfield(fitOpt,'tieGroups') && ~isempty(fitOpt.tieGroups)
+    tg = fitOpt.tieGroups;
+    if ~isstruct(tg)
+        error('fitOpt.tieGroups must be a struct array');
+    end
+    for gi = 1:length(tg)
+        members = tg(gi).members;
+        if ischar(members) || isstring(members), members = {char(members)}; end
+        if isempty(members) || length(members) < 2, continue; end
+        idxs = zeros(length(members),1);
+        for mi = 1:length(members)
+            idxs(mi) = resolveIdx(members{mi}, names);
+        end
+        leader = idxs(1);
+        params = tg(gi).params;
+        if ischar(params) || isstring(params), params = {char(params)}; end
+        for pp = 1:length(params)
+            switch lower(char(params{pp}))
+                case 'shift'
+                    aliasShift(idxs) = leader;
+                case {'lbl','lb_l'}
+                    aliasLbL(idxs) = leader;
+                case {'lbg','lb_g'}
+                    aliasLbG(idxs) = leader;
+                case {'phi0','phase0','phase'}
+                    aliasPhi0(idxs) = leader;
+                otherwise
+                    error('Unknown tieGroups param "%s"', char(params{pp}));
+            end
+        end
+    end
+end
+
+% Reduce: for each block, find the unique leaders (in order of first
+% appearance) and the position each component reads from.
+[uniqShift, ~, posShift] = unique(aliasShift, 'stable');
+[uniqLbL,   ~, posLbL  ] = unique(aliasLbL,   'stable');
+[uniqLbG,   ~, posLbG  ] = unique(aliasLbG,   'stable');
+[uniqPhi0,  ~, posPhi0 ] = unique(aliasPhi0,  'stable');
+
+nFreeShift = length(uniqShift);
+nFreeLbL   = length(uniqLbL);
+nFreeLbG   = length(uniqLbG);
+nFreePhi0  = length(uniqPhi0);
+
+% Map full-vector index -> reduced-vector index.
+mapToFull = [posShift(:).' ...
+             nFreeShift + posLbL(:).' ...
+             nFreeShift + nFreeLbL + posLbG(:).' ...
+             nFreeShift + nFreeLbL + nFreeLbG + posPhi0(:).'];
+
+pars0_red = [fitOpt.shiftInit(uniqShift).'    fitOpt.lbLInit(uniqLbL).'    fitOpt.lbGInit(uniqLbG).'    fitOpt.phaseInit(uniqPhi0).'];
+lb_red    = [fitOpt.shiftBounds(uniqShift,1).' fitOpt.lbLBounds(uniqLbL,1).' fitOpt.lbGBounds(uniqLbG,1).' fitOpt.phaseBounds(uniqPhi0,1).'];
+ub_red    = [fitOpt.shiftBounds(uniqShift,2).' fitOpt.lbLBounds(uniqLbL,2).' fitOpt.lbGBounds(uniqLbG,2).' fitOpt.phaseBounds(uniqPhi0,2).'];
+
 if fitOpt.phase1Enable
-    pars0 = [pars0 fitOpt.phase1Init];
-    lb    = [lb    fitOpt.phase1Bounds(1)];
-    ub    = [ub    fitOpt.phase1Bounds(2)];
+    pars0_red = [pars0_red fitOpt.phase1Init];
+    lb_red    = [lb_red    fitOpt.phase1Bounds(1)];
+    ub_red    = [ub_red    fitOpt.phase1Bounds(2)];
+    mapToFull = [mapToFull length(pars0_red)];
     parnames{end+1} = 'phi1(deg/ppm)';
 end
 
-nPars = length(pars0);
-if any(pars0 < lb) || any(pars0 > ub)
+% Full-length echoes for output (each tied follower repeats the leader).
+lb = lb_red(mapToFull);
+ub = ub_red(mapToFull);
+
+nPars = length(pars0_red);
+if any(pars0_red < lb_red) || any(pars0_red > ub_red)
     warning('Some initial parameters are outside their bounds; clipping.');
-    pars0 = min(max(pars0, lb), ub);
+    pars0_red = min(max(pars0_red, lb_red), ub_red);
 end
 
 % ------------------------------------------------------------------- %
@@ -297,9 +380,11 @@ options = optimset(oldopts, 'TolFun', tolFun, 'TolX', tolX, ...
     'Display', getDisplayFlag(fitOpt.verbose));
 
 % ------------------------------------------------------------------- %
-% run optimizer
+% run optimizer (operates on reduced free-parameter vector; residual
+% expands to full per-component vector via mapToFull)
 % ------------------------------------------------------------------- %
-ip_nonlin = lsqnonlin(@residual, pars0, lb, ub, options);
+ip_red    = lsqnonlin(@residual, pars0_red, lb_red, ub_red, options);
+ip_nonlin = ip_red(mapToFull);
 
 % ------------------------------------------------------------------- %
 % final evaluation
@@ -326,6 +411,26 @@ output.basisFIDmod    = fidMod;
 output.pars.shift     = shiftOut;
 output.pars.lbL       = lbLout;
 output.pars.lbG       = lbGout;
+% Voigt FWHM (Hz) per component via Olivero-Longbothum approximation:
+%   fwhmV ~ 0.5346*lbL + sqrt(0.2166*lbL^2 + lbG^2)
+% (uses fitted addition only; ignores any baseline broadening baked into
+% the basis FID at simulation time)
+output.pars.fwhmV     = 0.5346*lbLout(:) + sqrt(0.2166*lbLout(:).^2 + lbGout(:).^2);
+% Effective peak widths in the data: include the Lorentzian baked into
+% each basis FID (basisInfo.lwHzBasis) so that lbL_total / fwhmV_total
+% reflect what's actually observed, not just what the fit added on top.
+lwBase = zeros(nMet,1);
+if ~isempty(basisInfo) && isfield(basisInfo,'lwHzBasis')
+    for kBI = 1:min(numel(basisInfo), nMet)
+        if ~isempty(basisInfo(kBI).lwHzBasis)
+            lwBase(kBI) = basisInfo(kBI).lwHzBasis;
+        end
+    end
+end
+output.pars.lwHzBasis  = lwBase;
+output.pars.lbL_total  = lwBase + lbLout(:);
+output.pars.fwhmV_total = 0.5346*output.pars.lbL_total + ...
+                         sqrt(0.2166*output.pars.lbL_total.^2 + lbGout(:).^2);
 output.pars.phase0    = phi0out;
 output.pars.phase1    = phi1out;
 output.lb.shift       = lb(1:nMet);
@@ -352,6 +457,7 @@ output.parametricOpt  = parametricOpt;
 output.timeInfo       = timeInfo;
 output.nBasis         = nBasis;
 output.nParam         = nParam;
+output.basisInfo      = basisInfo;
 
 % =================================================================== %
 % nested functions (share parent workspace: allFIDs, t, x, xFit, yFit,
@@ -359,8 +465,9 @@ output.nParam         = nParam;
 % complexFit, N, f0, timeInfo)
 % =================================================================== %
 
-    function r = residual(ip)
-        Apk = buildApeak(ip);
+    function r = residual(ipRed)
+        ipFull = ipRed(mapToFull);
+        Apk = buildApeak(ipFull);
         [~, ~, ~, yf] = solveLinearBlock(Apk, B, yFit);
         resid = yf - yFit;
         if complexFit

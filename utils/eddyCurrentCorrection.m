@@ -47,10 +47,20 @@ switch opt
         si_ref = size(fid_ref);
         fid_ref = reshape(fid_ref,npts,nc,[]);
         phcorr = exp(-1i*angle(fid_ref));
-        noiseinds = find ( abs(fid_ref) < 5*std(fid_ref(end-30:end)) );
-        if ~isempty(noiseinds)
-            phcorr(noiseinds) = phcorr(max(noiseinds(1)-1,1)); 
+
+        % per-FID noise threshold and phase replacement (one column = one coil/channel FID)
+        F2 = reshape(fid_ref, npts, []);
+        P2 = reshape(phcorr,  npts, []);
+        tailStart = max(npts-30, 1);
+        noiseStd = std(F2(tailStart:end, :), 0, 1);
+        for jj = 1:size(F2,2)
+            noiseinds = find(abs(F2(:,jj)) < 5*noiseStd(jj));
+            if ~isempty(noiseinds)
+                P2(noiseinds, jj) = P2(max(noiseinds(1)-1,1), jj);
+            end
         end
+        phcorr = reshape(P2, npts, nc, []);
+
         fid_refecc = fid_ref .* phcorr;
         fid_refecc = reshape(fid_refecc,si_ref);
         if length(si_ref)<=2
