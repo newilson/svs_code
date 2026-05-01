@@ -1,12 +1,13 @@
-function [output,pars,fullHdr] = dat2mat_svs31p(pars,dat_file)
+function [output,pars,fullHdr] = bru2mat_svs31p(pars,bru_dir)
 %
-% [output,pars,fullHdr] = dat2mat_svs31p(pars,dat_file)
+% [output,pars,fullHdr] = bru2mat_svs31p(pars,bru_dir)
+%
+% Bruker high-field 31P SVS processing. See dat2mat_svs31p.m.
 %
 % Steps:
-% block averaging
+% read Bruker data
 % filtering
 % hsvd denoising
-% backwards linear prediction
 % Fourier Transform
 % phase correction
 % baseline correction
@@ -18,84 +19,64 @@ function [output,pars,fullHdr] = dat2mat_svs31p(pars,dat_file)
 thisFile = mfilename('fullpath');
 thisPath = fileparts(thisFile);
 addpath([thisPath filesep 'utils']);
-addpath([thisPath filesep 'mapVBVD']);
+addpath([thisPath filesep 'bruker']);
+
 
 % defaults
 if ~isfield(pars,'plt') || isempty(pars.plt), pars.plt = false; end
 if ~isfield(pars,'removeOS') || isempty(pars.removeOS), pars.removeOS = false; end
 if ~isfield(pars,'lb') || isempty(pars.lb), pars.lb = 0; end
 if ~isfield(pars,'den') || isempty(pars.den), pars.den = false; end
-if ~isfield(pars,'block_size'), pars.block_size = []; end
 if ~isfield(pars,'zf') || isempty(pars.zf), pars.zf = false; end
 if ~isfield(pars,'peaks'), pars.peaks = [0 5]; end % PCr, Pi
 if ~isfield(pars,'peakRanges'), pars.peakRanges = []; end
 if ~isfield(pars,'peakAddLB'), pars.peakAddLB = 3; end
 if ~isfield(pars,'PC'), pars.PC = 0; end
+if ~isfield(pars,'initPhDeg'), pars.initPhDeg = 0; end % initial phase guess in degrees
+if ~isfield(pars,'initPPMShift'), pars.initPPMShift = 0; end % initial shift guess in PPM
 if ~isfield(pars,'base'), pars.base = nan; end
 if ~isfield(pars,'hsvd') || ~isfield(pars.hsvd,'flag'), pars.hsvd.flag = false; end
 if ~isfield(pars.hsvd,'sv'), pars.hsvd.sv = []; end % HSVD singular values
 if ~isfield(pars.hsvd,'cad'), pars.hsvd.cad = 3; end % HSVD Cadzow iterations
 if ~isfield(pars,'dofit'), pars.dofit = false; end
-if ~isfield(pars,'blp'), pars.blp.flag = false; end % backwards linear prediction for TE delay
-if ~isfield(pars.blp,'modelOrder'), pars.blp.modelOrder = 0; end % auto select
-if ~isfield(pars,'block_align') || ~isfield(pars.block_align,'size'),   pars.block_align.size = 64; end
-if ~isfield(pars,'block_align') || ~isfield(pars.block_align,'method'), pars.block_align.method = 'fd'; end % 'td' (fidfreqshift) or 'fd' (fidfreqshift_fd)
-if ~isfield(pars.block_align,'Nfit'),     pars.block_align.Nfit = 256; end       % TD: # FID points fit
 if pars.dofit
     if ~isfield(pars.fit,'mode'), pars.fit.mode = 2; end % complex Lorentzian
 end
 
 if nargin<2
-    [file,path] = uigetfile('*.dat','Choose dat file');
-    dat_file = fullfile(path,file);
+    bru_dir = uigetdir('','Choose Bruker experiment directory');
 end
 
 
 %% read data
-twix_obj = mapVBVD(dat_file);
-if iscell(twix_obj)
-    twix_obj = twix_obj{end};
+
+[bruParams, fid] = bruker_read(bru_dir);
+fid = bruker_remove_digital_filter(bruParams, fid);
+fid = fid.'; 
+fullHdr = bruParams;
+bw     = bruParams.acqus.SW_h;                    % Hz
+f0     = bruParams.acqus.BF1;                     % MHz (31P at high field)
+npts   = size(fid,1);
+nave   = bruParams.acqus.NS;                       % number of scans (already summed in fid)
+TRus   = bruParams.acqus.D(2) * 1e6;              % TR delay (s -> us)
+
+adcshift = bruParams.acqus.O1;          
+seqname = bruParams.acqus.PULPROG;
+scanname = bruParams.acqus.EXP;
+
+% Notes:
+%   - Bruker `fid` is typically already sum-of-NS averages; if the
+%     experiment was acquired as a 'ser' file we may need to mean over
+%     the indirect dimension.
+%   - DSPFVS/GRPDLY-based group delay must be removed before processing
+%     (bruker_remove_digital_filter handles this).
+% -------------------------------------------------------------------------
+
+% if loaded as 2D (npts x nave), collapse to 1D average — no block averaging
+if ~isempty(fid) && size(fid,2) > 1
+    disp('averaging across scans')
+    fid = mean(fid,2);
 end
-
-twix_obj.image.flagRemoveOS = false;
-twix_obj.image.flagAverageSets = false;
-
-fullHdr = twix_obj.hdr;
-
-if isfield(twix_obj.hdr.Config,'DwellTime')
-    bw = 1e9/twix_obj.hdr.Config.DwellTime;
-elseif isfield(twix_obj.hdr.Config,'DwellTimeSig')
-    bw = 1e9/twix_obj.hdr.Config.DwellTimeSig;
-else
-    error('unknown dwell time')
-end
-f0 = 1e-6*twix_obj.hdr.Config.Frequency;
-nch = twix_obj.image.NCha; % should be 1
-if ~isequal(nch,1)
-    warning(['Number of coils is ' num2str(nch) '. Should be 1.'])
-end
-TEus = fullHdr.MeasYaps.alTE{1};
-
-nave = twix_obj.image.NAve;
-npts = twix_obj.image.NCol;
-reps = twix_obj.image.NRep;
-avgDim = find(strcmp(twix_obj.image.sqzDims,'Ave'));
-repDim = find(strcmp(twix_obj.image.sqzDims,'Rep'));
-
-seqname = twix_obj.hdr.MeasYaps.tSequenceFileName;
-
-wiplong = twix_obj.hdr.MeasYaps.sWipMemBlock.alFree;
-empInd = cellfun('isempty',wiplong);
-wiplong(empInd) = {0};
-wiplong = cell2mat(wiplong);
-wipdbl = twix_obj.hdr.MeasYaps.sWipMemBlock.adFree;
-empInd = cellfun('isempty',wipdbl);
-wipdbl(empInd) = {0};
-wipdbl = cell2mat(wipdbl);
-
-fid = twix_obj.image{''};
-
-si = size(fid);
 
 % remove OS
 if pars.removeOS
@@ -111,39 +92,17 @@ end
 
 fid = reshape(fid,npts,[]); % makes fid 2D
 
+% conjugate for Bruker
+% fid = conj(fid); 
+
 % time axis
 t = (0:npts-1)*1/bw;
 
 % freq axis
 hz = (-1/2:1/npts:1/2-1/npts)*bw;
+% hz = (1/2:-1/npts:-1/2+1/npts)*bw;
 ppm = hz/f0;
-
-adcshift = fullHdr.Phoenix.sSpecPara.dDeltaFrequency;
 ppm = ppm + adcshift;
-
-if nave>1
-    disp('block averaging')
-    if isempty(pars.block_align.size)
-        pars.block_align.size = size(fid,avgDim); % defaults to 1 block consisting of all the averages
-    end
-    nd = ndims(fid);
-    if avgDim>2 % make avgDim 2nd
-        if avgDim==nd
-            fid = permute(fid,[1 avgDim 2:avgDim-1]);
-        else
-            fid = permute(fid,[1 avgDim 2:avgDim-1 avgDim+1:nd]);
-        end
-    end
-    fid = blockAverage(fid,pars.block_align.size); % average dimension MUST be 2nd in ws here
-    if avgDim>2 % put back in order
-        if avgDim==nd
-            fid = permute(fid,[1 avgDim 2:avgDim-1]);
-        else
-            fid = permute(fid,[1 avgDim 2:avgDim-1 avgDim+1:nd]);
-        end
-    end
-end
-
 
 disp('filtering')
 fid = expFilter(t,pars.lb,fid);
@@ -160,37 +119,25 @@ if pars.hsvd.flag
     end
 end
 
-if pars.block_align.size < nave
-    disp('block alignment and resolve averages')
-    if isfield(pars.block_align,'saveDebug') && pars.block_align.saveDebug
-        output.met.blocks_pre = fid;  % FIDs before alignment, per block
-    end
-    switch lower(pars.block_align.method)
-        case 'fd'
-            fid = fidfreqshift_fd(t, fid, ppm, pars.block_align.ppmRange);
-        otherwise % 'td'
-            fid = fidfreqshift(t, fid, pars.block_align.Nfit, 0);
-    end
-    if isfield(pars.block_align,'saveDebug') && pars.block_align.saveDebug
-        output.met.blocks_post = fid; % FIDs after alignment, per block
-    end
-    fid = squeeze(mean(fid,2));
-end
-
 
 % output fid pre backwards linear prediction
 output.rawfid = fid;
 
-if pars.blp.flag
-    % Correct for TE delay
-    TEs = TEus * 1e-6;
-    nPredict = round(TEs/(1/bw)); % points to backwards predict
-    fid = blp_fid(fid,nPredict,pars.blp.modelOrder);
-end
-
-
 % Fourier Transform
 spec = fftshift(fft(fid,[],1),1);
+
+% initial shift and phase correction
+if pars.initPPMShift~=0
+    hzshift = pars.initPPMShift * f0;
+    for ii=1:size(spec,2)
+        spec(:,ii) = shiftSpectrumFrequency(spec(:,ii),hzshift,t);
+    end
+end
+if pars.initPhDeg~=0
+    spec = shiftSpectrumPhase(spec,pi/180 * pars.initPhDeg);
+end
+
+fid = ifft(ifftshift(spec,1),[],1);
 
 % peak-based frequency/phase correction
 if ~isempty(pars.peaks)
@@ -202,7 +149,6 @@ if ~isempty(pars.peaks)
     addlb = pars.peakAddLB;
 
     disp('peak-based frequency correction')
-    % line-broadened magnitude spectrum for peak detection
     fidlb = expFilter(t,addlb,fid);
     specmag = abs(fftshift(fft(fidlb,[],1),1));
 
@@ -222,7 +168,6 @@ if ~isempty(pars.peaks)
     end
 
     disp('peak-based phase correction')
-    % recompute line-broadened spectrum after frequency correction
     speclb = fftshift(fft(fidlb,[],1),1);
     specmag = abs(speclb);
 
@@ -261,7 +206,7 @@ end
 
 % phase correction
 if ~isfield(pars,'PC') || isempty(pars.PC)
-    pivot0 = 0; 
+    pivot0 = 0;
     f = NWman_phase(spec,ppm,'Manual phase correction: save and close when done',pivot0);
     waitfor(f);
     if exist('out','var')
@@ -275,25 +220,6 @@ elseif isstruct(pars.PC)
     end
     spec = shiftSpectrumPhase(spec,[pars.PC.pc0 pars.PC.pc1],ppm,pars.PC.pivot);
 end
-
-
-% switch pars.den
-%     case 'svd'
-%         % svd denoising
-%         if size(spec,2)>1
-%             f = NWsvdTS(spec,ppm,'SVD denoising: save and close when done');
-%             waitfor(f);
-%             spec = out; clear out
-%         end
-%     case 'wav'
-%         % wavelet filtering
-%         if exist('wmaxlev')
-%             f = NWwavden(spec,ppm,'Wavelet denoising: save and close when done');
-%             waitfor(f);
-%             spec = out; clear out
-%         end
-% 
-% end
 
 
 % baseline correction
@@ -311,17 +237,24 @@ if isfield(pars,'base') && strcmpi(pars.base,'full')
 end
 
 
-
 % fitting
 if pars.dofit
 
-    if ischar(pars.fit.mode) && strcmpi(pars.fit.mode,'lcmodel') 
+    % --- TODO: high-field 31P fitting adjustments -----------------------
+    % Starting point: dat2mat_svs31p uses basisVarpro and AMARES with
+    % linewidths/bounds tuned for 7T. At higher field (e.g. 9.4/11.7 T):
+    %   - rescale Hz-based bounds (lbL, lbG, shift) since chemical shift
+    %     dispersion in Hz grows with f0
+    %   - basis FIDs need to be regenerated at the new f0
+    %   - AMARES PK_*_NW prior knowledge files may need a high-field variant
+    % For now: leave the fit dispatch as a stub.
+    % --------------------------------------------------------------------
 
-        % creates .RAW files for LCModel fitting
-        rawfile = regexprep(dat_file,'datfile','rawfile');
-        rawfile = regexprep(rawfile,'.dat','.raw');
-        fid = ifft(ifftshift(spec,1),[],1);
-        create_lcmodelRAW(rawfile,fid,'NUNFIL',length(fid),'DELTAT',1/bw,'HZPPPM',f0);
+    if ischar(pars.fit.mode) && strcmpi(pars.fit.mode,'lcmodel')
+
+        rawfile = fullfile(bru_dir,'lcmodel.raw');
+        fid_for_raw = ifft(ifftshift(spec,1),[],1);
+        create_lcmodelRAW(rawfile,fid_for_raw,'NUNFIL',length(fid_for_raw),'DELTAT',1/bw,'HZPPPM',f0);
 
     elseif ischar(pars.fit.mode) && strcmpi(pars.fit.mode,'basisvarpro')
 
@@ -478,116 +411,17 @@ if pars.dofit
         outFit.totals.UDP_components = udpFound;
 
         if pars.plt
-            [~,fname,~] = fileparts(dat_file);
-            plot_basisvarpro_31p(outFit, fname);
-            plot_basisSpectra_31p(outFit, fname);
+            plot_basisvarpro_31p(outFit, scanname);
+            plot_basisSpectra_31p(outFit, scanname);
         end
 
         output.basisVarproResults = outFit;
 
     elseif ischar(pars.fit.mode) && strcmpi(pars.fit.mode,'amares')
-        
-        % OXSA->AMARES
-        addpath(genpath('Z:\code\OXSA'))
 
-        % Pass spectrum and let AMARES reconstruct the FID via specInvFft
-        % (which correctly handles the 2x t=0 point convention).
-        % Do NOT pass signals — let AMARES use the spectra path.
-        amaresStruct.samples = size(spec,1);
-        amaresStruct.dwellTime = 1 / bw;
-        amaresStruct.imagingFrequency = f0;
-        amaresStruct.timeAxis = t(:);
-        amaresStruct.ppmAxis = ppm(:);
-        amaresStruct.signals = {[]};              % empty so AMARES uses spectra path
-        amaresStruct.spectra = {spec(:,1)};
+        % --- TODO: high-field 31P AMARES prior knowledge -----------------
+        warning('AMARES fit not yet wired for Bruker high-field data.')
 
-        % DEBUG
-        % debug_pk;
-
-        % Fit
-        % beginTime = time from pulse centroid to first ADC sample (s)
-        beginTime = TEus * 1e-6;
-
-        % --- Stage 1: Fit major peaks with basic PK ---
-        PK1 = AMARES.priorKnowledge.PK_7T_31P_Basic_NW();
-        for iPK = 1:length(PK1.initialValues)
-            PK1.initialValues(iPK).chemShift = PK1.initialValues(iPK).chemShift - adcshift;
-            if ~isempty(PK1.bounds(iPK).chemShift)
-                PK1.bounds(iPK).chemShift = PK1.bounds(iPK).chemShift - adcshift;
-            end
-        end
-        Results1 = AMARES.amares(amaresStruct,1,1,beginTime,0.0,PK1,0,'fixOffset',0);
-
-        % --- Stage 2: Fit full model, seeding amplitudes from Stage 1 ---
-        PK2 = AMARES.priorKnowledge.PK_7T_31P_Ren_NW();
-        for iPK = 1:length(PK2.initialValues)
-            PK2.initialValues(iPK).chemShift = PK2.initialValues(iPK).chemShift - adcshift;
-            if ~isempty(PK2.bounds(iPK).chemShift)
-                PK2.bounds(iPK).chemShift = PK2.bounds(iPK).chemShift - adcshift;
-            end
-        end
-
-        % Seed matching peaks from Stage 1 results
-        basicNames = {'PCr','ATPb','ATPa','ATPg','Pi','PE','PC','GPE','GPC'};
-        for iPK = 1:length(PK2.initialValues)
-            pn = PK2.initialValues(iPK).peakName;
-            if iscell(pn), pn = pn{1}(1:end-1); else, pn = pn; end
-            matchIdx = find(strcmp(basicNames, pn));
-            if ~isempty(matchIdx)
-                PK2.initialValues(iPK).amplitude = Results1.Amplitudes(matchIdx);
-                PK2.initialValues(iPK).linewidth = Results1.Linewidths(matchIdx);
-                PK2.initialValues(iPK).phase = mod(Results1.Phases(matchIdx), 360);
-                PK2.initialValues(iPK).chemShift = Results1.ChemicalShifts(matchIdx);
-            end
-        end
-
-        % For NAD/UDP, seed amplitudes from literature ratios relative
-        % to PCr, and seed phase from Stage 1 average
-        PCrAmp = Results1.Amplitudes(1);  % PCr is compound 1 in basic PK
-        avgPhase = mod(mean(Results1.Phases), 360);
-        for iPK = 1:length(PK2.initialValues)
-            pn = PK2.initialValues(iPK).peakName;
-            if iscell(pn), pn = pn{1}(1:end-1); else, pn = pn; end
-            if ~any(strcmp(basicNames, pn))
-                % NAD+ ~10-15% of PCr, NADH ~1-2% of PCr
-                % UDP(G) total ~10% of PCr (Ren 2021 Table 1):
-                %   UDPGal ~16%, UDPGlc ~30%, UDPGalNAc ~24%, UDPGlcNAc ~30%
-                if strcmp(pn,'NADH')
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.015;
-                elseif strncmp(pn,'NADp',4)
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.08;
-                elseif strncmp(pn,'UDPS',4)
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.05;  % combined UDP
-                elseif strncmp(pn,'UDPGal_',7)
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.016; % ~16% of total UDP
-                elseif strncmp(pn,'UDPGlc_',7)
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.030; % ~30% of total UDP
-                elseif strncmp(pn,'UDPGaNAc',8)
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.024; % ~24% of total UDP
-                elseif strncmp(pn,'UDPGcNAc',8)
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.030; % ~30% of total UDP
-                elseif strcmp(pn,'Broad10_5') || strcmp(pn,'Broad8_5') || strcmp(pn,'BroadMP')
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.03;
-                else
-                    PK2.initialValues(iPK).amplitude = PCrAmp * 0.015;
-                end
-                PK2.initialValues(iPK).phase = avgPhase;
-            end
-        end
-
-        Results = AMARES.amares(amaresStruct,1,1,beginTime,0.0,PK2,0, ...
-            'fixOffset',0,'skipLinearInit',true,'MaxIter',500,'MaxFunEvals',5000);
-
-        if pars.plt
-            plot_amares_full(Results1);
-            plot_amares_full(Results);
-            plot_amares_nadudp(Results);
-        end
-
-        output.AmaresResults = Results;
-
-        rmpath(genpath('Z:\code\OXSA'))
-       
     else
 
         if isfield(pars.fit,'ppm_range')
@@ -606,14 +440,13 @@ if pars.dofit
 
         elseif strcmpi(pars.dofit,'man')
 
-            minw = 10/f0; % 10 Hz minimum linewidth
+            minw = 10/f0;
             [yfit,names,areas,ip,ip0,lb,ub] = curvefitMan(x,double(real(y)),minw,pars.fit.mode,pars.fit.peaks);
 
             if pars.plt
                 figure, plot(x,real(y),'k',x,yfit,'r',x,real(y)-yfit,'g'), legend({'data','fit','residual'}), set(gca,'xdir','reverse')
             end
 
-            % fit output
             output.fit.spec = y;
             output.fit.spec_fit = yfit;
             output.fit.pars = ip;
@@ -637,5 +470,5 @@ output.hz = hz;
 output.ppm = ppm;
 
 
-rmpath([thisPath filesep 'mapVBVD']);
 rmpath([thisPath filesep 'utils']);
+rmpath([thisPath filesep 'bruker']);
