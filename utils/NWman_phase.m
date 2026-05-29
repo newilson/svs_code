@@ -1,6 +1,6 @@
 function f = NWman_phase(spec,ax_vals,fig_title,pivot0,spec_ref,ref_ax)
 
-if nargin<4 || isempty(pivot0), pivot0 = ax_vals(end/2+1); end
+if nargin<4 || isempty(pivot0), pivot0 = ax_vals(round(end/2)+1); end
 if nargin<5, spec_ref = []; end
 if nargin<6 && ~isempty(spec_ref), ref_ax = ax_vals; end
 

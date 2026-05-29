@@ -40,7 +40,7 @@ nMet  = numel(names);
 ncols = min(nMet, 4);
 nrows = ceil(nMet/ncols);
 
-fig = figure('Position',[10 10 320*ncols 260*nrows]);
+fig = figure('Position',[10 10 320*ncols 260*nrows], 'Name','31P basis spectra gallery');
 
 ydat   = real(y);
 ymax   = max(abs(ydat));

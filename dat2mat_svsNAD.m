@@ -146,7 +146,7 @@ if contains(seqname,'eja_svs_slaser')
 % [~,delay_ind] = max(abs(nwstemp)); % 192
 %     delay_ind = npts - vectorSize; % 256
     delay_ind = nws_obj.noise.iceParam(5); % 230
-elseif contains(seqname,'svssel_latest') % check this for different versions of svssel_latest
+elseif contains(seqname,'svssel') % check this for different versions of svssel_latest
     delay_ind = 2 * wiplong(8);
 else
     delay_ind = 0;
@@ -170,7 +170,7 @@ t = (0:vectorSize-1)*1/bw;
 
 % freq axis
 hz = (-1/2:1/vectorSize:1/2-1/vectorSize)*bw;
-if contains(seqname,'svssel_latest') && ~contains(seqname,'svssel_latest0')  % older versions up to svssel_latest021224 do not include this
+if contains(seqname,'svssel') && ~contains(seqname,'svssel_latest0')  % older versions up to svssel_latest021224 do not include this
     if length(wipdbl)<10 % scandate < datetime('20240212','InputFormat','yyyyMMdd') % this date needs to be confirmed
         center_freq = 4.72;
     else
@@ -250,7 +250,7 @@ wipdbl = cell2mat(wipdbl);
 % timing correction - needed for eja_slaser_svs and svssel_latest
 if contains(seqname,'eja_svs_slaser')
     delay_ind = ws_obj.noise.iceParam(5); % 230
-elseif contains(seqname,'svssel_latest') % check this for different versions of svssel_latest
+elseif contains(seqname,'svssel') % check this for different versions of svssel_latest
     delay_ind = 2 * wiplong(8);
 else
     delay_ind = 0;
@@ -277,7 +277,7 @@ t = (0:vectorSize-1)*1/bw;
 
 % freq axis
 hz = (-1/2:1/vectorSize:1/2-1/vectorSize)*bw;
-if contains(seqname,'svssel_latest') && ~contains(seqname,'svssel_latest0')  % older versions up to svssel_latest021224 do not include this
+if contains(seqname,'svssel') && ~contains(seqname,'svssel_latest0')  % older versions up to svssel_latest021224 do not include this
     if length(wipdbl)<10 % scandate < datetime('20240212','InputFormat','yyyyMMdd') % this date needs to be confirmed
         center_freq = 4.72;
         exc_freq = wipdbl(4);
@@ -430,7 +430,7 @@ if ~strcmpi(pars.WatSupPost.opts.type,'none')
     if pars.plt
         temp2 = real(fftshift(fft(ws(:,:),[],1),1));
         if isvector(ws)
-            figure, plot(ppm, temp,'-k',ppm,temp2,'-r'), title('residual water removal'), set(gca,'xdir','reverse')
+            figure('Name','1H residual water removal'), plot(ppm, temp,'-k',ppm,temp2,'-r'), title('residual water removal'), set(gca,'xdir','reverse')
         else
             NWplayplot(temp2,ppm,'residual water removal',temp, ppm);
         end
@@ -584,7 +584,7 @@ end
 % end
 
 if pars.pltSpec
-    figure, plot(ppm,real(ws)), title(fname), set(gca,'xdir','reverse')
+    figure('Name','1H processed spectrum'), plot(ppm,real(ws)), title(fname), set(gca,'xdir','reverse')
 end
 
 
@@ -651,6 +651,47 @@ if pars.dofit
         if ~isfield(pars.fit.baselineOpt,'widthBounds')
             pars.fit.baselineOpt.widthBounds = [10/f0 60/f0]; % ppm
         end
+
+        % --- Broad component handling (consistent with the 31P pipeline) -----
+        % Peaks whose name starts with 'Broad' are wide macromolecular/baseline
+        % components (cf. 'BroadMP','Broad10_5' in processU01_Brain_31P).  They
+        % get wide linewidth bounds and a broad initial width, and are excluded
+        % from the coarse phase fit (they are nuisance signal, not phase
+        % references).  Everything else keeps the default narrow bounds.
+        npksAll = numel(pars.peaks.name);
+        wb0 = pars.fit.baselineOpt.widthBounds;
+        if size(wb0,1) == 1
+            peakWB = repmat(wb0, npksAll, 1);   % expand global -> per-peak
+        else
+            peakWB = wb0;
+        end
+        isBroad = startsWith(pars.peaks.name(:), 'Broad');
+        if isfield(pars.fit,'broadWidthBounds') && ~isempty(pars.fit.broadWidthBounds)
+            broadWB = pars.fit.broadWidthBounds;
+        else
+            broadWB = [65/f0 180/f0];   % ~0.22-0.61 ppm: broader than the narrow
+                                        % peaks but a local hump, not a window-wide
+                                        % blob that competes with the spline
+        end
+        if isfield(pars.fit,'broadWidthInit') && ~isempty(pars.fit.broadWidthInit)
+            broadW0 = pars.fit.broadWidthInit;
+        else
+            broadW0 = 150/f0;           % ~0.5 ppm init (cf. 31P 100 Hz)
+        end
+        % broad components are kept near-absorptive: a smooth macromolecular
+        % baseline should not carry dispersive (phased) character, otherwise it
+        % spreads broadly negative and the spline arches above the data to
+        % cancel it (a spline<->broad degeneracy).
+        if isfield(pars.fit,'broadPhaseBounds') && ~isempty(pars.fit.broadPhaseBounds)
+            broadPB = pars.fit.broadPhaseBounds;
+        else
+            broadPB = [-15 15];
+        end
+        if any(isBroad)
+            peakWB(isBroad,:) = repmat(broadWB, sum(isBroad), 1);
+            fprintf('Broad component(s): %s  (LW %.3g-%.3g ppm, init %.3g)\n', ...
+                strjoin(pars.peaks.name(isBroad), ', '), broadWB(1), broadWB(2), broadW0);
+        end
         % focus weighting for Step 2: emphasize a sub-range of the fit
         if ~isfield(pars.fit,'focusRange')
             if isfield(pars.fit,'ppm_range')
@@ -682,7 +723,7 @@ if pars.dofit
                 numel(f_nuis), min(pars.fit.hsvdClean.range), max(pars.fit.hsvdClean.range))
 
             if pars.plt
-                figure
+                figure('Name','1H HSVD nuisance removal')
                 plot(ppm, real(ws), 'k', ppm, real(ws_clean), 'r')
                 set(gca, 'xdir', 'reverse')
                 legend({'original','HSVD cleaned'})
@@ -692,183 +733,323 @@ if pars.dofit
             ws = ws_clean;
         end
 
-        % extract fitting range (used for both steps)
-        if isfield(pars.fit,'ppm_range_coarse')
-            inds = find( ppm > min(pars.fit.ppm_range_coarse) & ppm < max(pars.fit.ppm_range_coarse));
-            x = ppm(inds);
-            y = double(real(ws(inds)));
-        elseif isfield(pars.fit,'ppm_range')
-            inds = find( ppm > min(pars.fit.ppm_range) & ppm < max(pars.fit.ppm_range));
-            x = ppm(inds);
-            y = double(real(ws(inds)));
-        else
-            x = ppm;
-            y = double(real(ws));
-        end
+        % ============================================================
+        % Region setup (multi-region capable)
+        % ============================================================
+        % pars.fit.regions (optional) is a struct array; each element:
+        %   .fitRange - [min max] ppm window (required)
+        %   .peaks    - cell of names from pars.peaks.name active in this
+        %               region (default: peaks whose center is in fitRange)
+        %   .name     - optional label
+        %   .mode/.ph_range/.baselineOpt/.lineShapeOpt/.focusRange/.focusWeight
+        %             - optional per-region overrides of the shared settings
+        % When unset, a single implicit region spans the coarse range with
+        % every peak, reproducing the original single-region behaviour.
+        % pars.fit.coarseMode controls how coarse fit + phase correction are
+        % derived for multiple regions:
+        %   'perRegion' (default) - independent coarse->phase->fine per region
+        %   'union'               - one coarse fit + phase over the union of
+        %                           all region windows, then per-region fine
+        useRegions = isfield(pars.fit,'regions') && ~isempty(pars.fit.regions);
 
         minw = 10/f0;
-        npeaks = size(pars.peaks.range, 1);
 
-        % ============================================================
-        % Step 1: Coarse VARPRO fit (initialization + phase estimation)
-        % ============================================================
-        % Naive seeds: center of each peak range, default width, phase 0.
-        % Wide phase bounds and relaxed tolerances — just needs to land
-        % in the right basin to estimate phase for correction.
-        disp('Step 1: Coarse VARPRO initialization...')
-        center0 = mean(pars.peaks.range, 2);
-        width0 = (30/f0) * ones(npeaks, 1);
-
-        coarseBaseOpt = pars.fit.baselineOpt;
-        coarseBaseOpt.centerBounds = pars.peaks.range;
-        coarseBaseOpt.TolFun = 1e-3;
-        coarseBaseOpt.TolX   = 1e-3;
-
-        % per-peak amplitude upper bounds
-        coarseAmplUB = zeros(npeaks, 1);
-        for kk = 1:npeaks
-            rng = pars.peaks.range(kk,:);
-            localInds = x > min(rng) & x < max(rng);
-            if any(localInds)
-                coarseAmplUB(kk) = max(abs(real(y(localInds))));
-            else
-                coarseAmplUB(kk) = max(abs(real(y)));
-            end
-        end
-        coarseBaseOpt.amplUB = coarseAmplUB;
-
-        % wide phase bounds, no lineshape kernel, no focus weighting
-        coarseFit = curvefitAuto_varproBaseline(x, y, pars.fit.mode, ...
-            ones(npeaks,1), center0, width0, [-179 179], minw, ...
-            coarseBaseOpt);
-
-        % extract coarse parameters
-        center0 = coarseFit.pars(npeaks + (1:npeaks))';
-        if pars.fit.mode == 5 || pars.fit.mode == 7
-            ph0 = coarseFit.pars(3*npeaks + (1:npeaks))';
-            width0 = coarseFit.pars(5*npeaks + (1:npeaks))'; % total Voigt width
-        elseif pars.fit.mode == 3 || pars.fit.mode == 4
-            ph0 = coarseFit.pars(3*npeaks + (1:npeaks))';
-            width0 = coarseFit.pars(2*npeaks + (1:npeaks))';
+        if isfield(pars.fit,'ppm_range_coarse')
+            baseRange = pars.fit.ppm_range_coarse;
+        elseif isfield(pars.fit,'ppm_range')
+            baseRange = pars.fit.ppm_range;
         else
-            ph0 = zeros(npeaks, 1);
-            width0 = coarseFit.pars(2*npeaks + (1:npeaks))';
+            baseRange = [min(ppm) max(ppm)];
+        end
+
+        if useRegions
+            regionList = pars.fit.regions(:);
+        else
+            regionList = struct('fitRange', {[min(baseRange) max(baseRange)]}, ...
+                                'peaks', {pars.peaks.name}, 'name', {'all'});
+        end
+        nRegions = numel(regionList);
+
+        if isfield(pars.fit,'coarseMode') && ~isempty(pars.fit.coarseMode)
+            coarseMode = lower(pars.fit.coarseMode);
+        else
+            coarseMode = 'perregion';
+        end
+        if ~ismember(coarseMode, {'perregion','union'})
+            error('pars.fit.coarseMode must be ''perRegion'' or ''union''')
+        end
+
+        % resolve each region's peak indices into pars.peaks.name
+        regSel = cell(nRegions,1);
+        peakCenters = mean(pars.peaks.range, 2);
+        for r = 1:nRegions
+            reg = regionList(r);
+            if isfield(reg,'peaks') && ~isempty(reg.peaks)
+                nm = reg.peaks;
+                if ischar(nm), nm = {nm}; end
+                sel = zeros(1, numel(nm));
+                for q = 1:numel(nm)
+                    ii = find(strcmpi(pars.peaks.name, nm{q}), 1);
+                    if isempty(ii)
+                        error('region %d peak "%s" not found in pars.peaks.name', r, nm{q})
+                    end
+                    sel(q) = ii;
+                end
+            else
+                sel = find(peakCenters(:).' > min(reg.fitRange) & peakCenters(:).' < max(reg.fitRange));
+                if isempty(sel)
+                    error('region %d (%g-%g ppm) contains no peaks; set .peaks or widen fitRange', ...
+                        r, min(reg.fitRange), max(reg.fitRange))
+                end
+            end
+            regSel{r} = sel;
+        end
+
+        % ============================================================
+        % Step 1: Coarse VARPRO fit(s) + phase correction
+        % ============================================================
+        npks = numel(pars.peaks.name);
+        center0_all = zeros(npks,1);
+        width0_all  = zeros(npks,1);
+        ph0_all     = zeros(npks,1);
+        pcInfo      = repmat(struct('pc0',0,'pc1',0), nRegions, 1);
+        coarseStore = cell(nRegions,1);
+        wsP_store   = cell(nRegions,1);
+
+        if strcmp(coarseMode,'union')
+            allSel = unique(cat(2, regSel{:}));
+            allSelC = allSel(~isBroad(allSel));      % broad peaks excluded from phase fit
+            if isempty(allSelC), allSelC = allSel; end
+            allRanges = cat(1, regionList.fitRange);
+            unionRange = [min(allRanges(:)) max(allRanges(:))];
+            disp('Step 1: Coarse VARPRO (union)...')
+            boC = pars.fit.baselineOpt;  boC.widthBounds = peakWB(allSelC,:);
+            wiC = []; if isfield(pars.peaks,'widthInit') && ~isempty(pars.peaks.widthInit), wiC = pars.peaks.widthInit(allSelC); end
+            [wsP, c0, w0, p0, pc0, pc1, cf] = nadCoarsePhase(ws, ppm, f0, center_freq, ...
+                unionRange, pars.peaks.range(allSelC,:), pars.fit.mode, ...
+                boC, minw, pars.plt, 'union', wiC);
+            center0_all(allSelC) = c0;  width0_all(allSelC) = w0;  ph0_all(allSelC) = p0;
+            allSelB = allSel(isBroad(allSel));        % seed broad peaks for the fine fit
+            if ~isempty(allSelB)
+                center0_all(allSelB) = mean(pars.peaks.range(allSelB,:), 2);
+                width0_all(allSelB)  = broadW0;
+                ph0_all(allSelB)     = 0;
+            end
+            for r = 1:nRegions
+                pcInfo(r).pc0 = pc0;  pcInfo(r).pc1 = pc1;
+                wsP_store{r}  = wsP;  coarseStore{r} = cf;
+            end
+            fprintf('Phase correction (union): pc0 = %.1f deg, pc1 = %.1f deg\n', pc0, pc1)
+        else
+            disp('Step 1: Coarse VARPRO (per region)...')
+            for r = 1:nRegions
+                sel  = regSel{r};
+                selC = sel(~isBroad(sel));        % broad peaks excluded from phase fit
+                if isempty(selC), selC = sel; end
+                lbl = regionLabel(regionList, r);
+                boC = pars.fit.baselineOpt;  boC.widthBounds = peakWB(selC,:);
+                wiC = []; if isfield(pars.peaks,'widthInit') && ~isempty(pars.peaks.widthInit), wiC = pars.peaks.widthInit(selC); end
+                [wsP_r, c0, w0, p0, pc0, pc1, cf] = nadCoarsePhase(ws, ppm, f0, center_freq, ...
+                    regionList(r).fitRange, pars.peaks.range(selC,:), pars.fit.mode, ...
+                    boC, minw, pars.plt, lbl, wiC);
+                center0_all(selC) = c0;  width0_all(selC) = w0;  ph0_all(selC) = p0;
+                pcInfo(r).pc0 = pc0;  pcInfo(r).pc1 = pc1;
+                wsP_store{r}  = wsP_r;  coarseStore{r} = cf;
+                selB = sel(isBroad(sel));         % seed broad peaks for the fine fit
+                if ~isempty(selB)
+                    center0_all(selB) = mean(pars.peaks.range(selB,:), 2);
+                    width0_all(selB)  = broadW0;
+                    ph0_all(selB)     = 0;
+                end
+                fprintf('  region %d (%s): pc0 = %.1f deg, pc1 = %.1f deg\n', r, lbl, pc0, pc1)
+            end
         end
 
         disp('Coarse VARPRO parameters:')
-        for kk = 1:npeaks
+        for kk = 1:npks
             fprintf('  %s: pos=%.3f ppm, width=%.4f ppm, phase=%.1f deg\n', ...
-                pars.peaks.name{kk}, center0(kk), width0(kk), ph0(kk))
+                pars.peaks.name{kk}, center0_all(kk), width0_all(kk), ph0_all(kk))
         end
 
-        if pars.plt
-            figure
-            plot(x, real(y), 'k', x, coarseFit.fit, 'r', x, real(y) - coarseFit.fit, 'g')
-            hold on, plot(x, coarseFit.baseline, 'b--')
-            legend({'data','coarse fit','residual','baseline'})
-            set(gca,'xdir','reverse')
-            title('Step 1: Coarse VARPRO fit')
-        end
-
-        % ============================================================
-        % Phase correction from coarse fit
-        % ============================================================
-        % Fit linear phase (pc0 + pc1) through per-peak phases vs ppm,
-        % then apply to full complex spectrum before the fine fit.
-        peakPositions_ppm = center0(:);
-        peakPhases_deg = ph0(:);
-        if npeaks == 1
-            pc0 = peakPhases_deg;
-            pc1 = 0;
-        else
-            p = polyfit(peakPositions_ppm, peakPhases_deg, 1);
-            pc1_per_ppm = p(1); % deg/ppm
-            pc0 = polyval(p, center_freq); % 0th order at pivot
-            % shiftSpectrumPhase convention: pc1 is total 1st-order
-            % phase across half the bandwidth
-            pc1 = pc1_per_ppm * abs(ppm(end) - ppm(1)) / 2;
-        end
-        fprintf('Phase correction: pc0 = %.1f deg, pc1 = %.1f deg\n', pc0, pc1)
-
-        ws = shiftSpectrumPhase(ws, [pc0 pc1], ppm, center_freq);
-        output.met.fit.phaseCorr.pc0 = pc0;
-        output.met.fit.phaseCorr.pc1 = pc1;
-        output.met.fit.phaseCorr.pivot = center_freq;
-
-        % re-extract fitting range from phase-corrected spectrum
-        y = double(real(ws(inds)));
-
-        % ============================================================
-        % Step 2: Fine VARPRO fit on phase-corrected spectrum
-        % ============================================================
-        disp('Step 2: Fine VARPRO fit...')
-        pars.fit.baselineOpt.centerBounds = pars.peaks.range;
-        amp0 = ones(size(center0));
-
-        % per-peak amplitude upper bounds from phase-corrected data
-        amplUB = zeros(npeaks, 1);
-        for kk = 1:npeaks
-            rng = pars.peaks.range(kk,:);
-            localInds = x > min(rng) & x < max(rng);
-            if any(localInds)
-                amplUB(kk) = max(abs(real(y(localInds))));
-            else
-                amplUB(kk) = max(abs(real(y)));
+        % Optional per-peak width seed override for the FINE fit.  Use when a
+        % peak parks in a narrow local minimum during coarse (e.g. broad Trp
+        % swamped by the NAD-dominant LS).  Vector aligned with
+        % pars.peaks.name; entries <=0 or NaN keep the coarse-fitted width.
+        if isfield(pars.peaks,'widthInit') && ~isempty(pars.peaks.widthInit)
+            wi = pars.peaks.widthInit(:);
+            assert(numel(wi) == npks, ...
+                'pars.peaks.widthInit must be length numel(pars.peaks.name) = %d', npks);
+            override = wi > 0 & ~isnan(wi);
+            if any(override)
+                fprintf('Per-peak widthInit override (fine-fit seed):\n');
+                for kk = find(override(:))'
+                    fprintf('  %s: %.4f -> %.4f ppm\n', ...
+                        pars.peaks.name{kk}, width0_all(kk), wi(kk));
+                end
+                width0_all(override) = wi(override);
             end
         end
-        pars.fit.baselineOpt.amplUB = amplUB;
 
-        % build focus weight vector for Step 2
-        fitWeights = ones(size(x(:)));
-        if ~isempty(pars.fit.focusRange) && pars.fit.focusWeight > 1
-            focusInds = x > min(pars.fit.focusRange) & x < max(pars.fit.focusRange);
-            fitWeights(focusInds) = pars.fit.focusWeight;
-            fprintf('Focus weighting: %.1fx on [%.1f - %.1f] ppm (%d/%d points)\n', ...
-                pars.fit.focusWeight, min(pars.fit.focusRange), max(pars.fit.focusRange), ...
-                sum(focusInds), length(x))
+        % ============================================================
+        % Step 2: Fine VARPRO fit per region (on phased spectrum)
+        % ============================================================
+        disp('Step 2: Fine VARPRO fit...')
+        nppm         = numel(ppm);
+        areasAll     = zeros(1, npks);   % base-Voigt area (ampl .* width), kernel-blind
+        areasConvAll = zeros(1, npks);   % kernel-aware (trapz of convolved component)
+        compAll      = nan(nppm, npks);
+        fitFull  = nan(nppm, 1);
+        baseFull = nan(nppm, 1);
+        specFull = nan(nppm, 1);
+        modesUsed   = zeros(nRegions,1);
+        regFitStore = cell(nRegions,1);
+
+        for r = 1:nRegions
+            reg = regionList(r);
+            sel = regSel{r};
+            inds_r = find(ppm > min(reg.fitRange) & ppm < max(reg.fitRange));
+            x_r = ppm(inds_r);
+            y_r = double(real(wsP_store{r}(inds_r)));
+
+            modeR = pars.fit.mode;
+            if isfield(reg,'mode') && ~isempty(reg.mode), modeR = reg.mode; end
+            phR = pars.fit.ph_range;
+            if isfield(reg,'ph_range') && ~isempty(reg.ph_range), phR = reg.ph_range; end
+            baseR = pars.fit.baselineOpt;
+            if isfield(reg,'baselineOpt') && isstruct(reg.baselineOpt)
+                fn = fieldnames(reg.baselineOpt);
+                for ii = 1:numel(fn), baseR.(fn{ii}) = reg.baselineOpt.(fn{ii}); end
+            end
+            % per-peak linewidth bounds (broad components wide), unless the
+            % region explicitly overrode widthBounds itself
+            if ~(isfield(reg,'baselineOpt') && isfield(reg.baselineOpt,'widthBounds'))
+                baseR.widthBounds = peakWB(sel,:);
+            end
+            % per-peak phase bounds: broad components near-absorptive, narrow
+            % peaks keep the region phase range (phR)
+            pbR = repmat(phR(:).', numel(sel), 1);
+            ib  = isBroad(sel);
+            if any(ib), pbR(ib,:) = repmat(broadPB, sum(ib), 1); end
+            baseR.phaseBounds = pbR;
+            lsR = [];
+            if isfield(pars.fit,'lineShapeOpt'), lsR = pars.fit.lineShapeOpt; end
+            if isfield(reg,'lineShapeOpt') && ~isempty(reg.lineShapeOpt), lsR = reg.lineShapeOpt; end
+            focusR = pars.fit.focusRange;
+            focusW = pars.fit.focusWeight;
+            if isfield(reg,'focusRange'),  focusR = reg.focusRange;  end
+            if isfield(reg,'focusWeight'), focusW = reg.focusWeight; end
+
+            outR = nadFineFit(x_r, y_r, center0_all(sel), width0_all(sel), ...
+                pars.peaks.range(sel,:), baseR, focusR, focusW, modeR, phR, minw, lsR);
+
+            regFitStore{r} = outR;
+            modesUsed(r)   = modeR;
+            areasAll(sel)  = outR.areas;
+            if isfield(outR, 'areasConv')
+                areasConvAll(sel) = outR.areasConv;
+            else
+                areasConvAll(sel) = outR.areas;
+            end
+            compAll(inds_r, sel) = outR.comp;
+            fitFull(inds_r)  = outR.fit;
+            baseFull(inds_r) = outR.baseline;
+            specFull(inds_r) = y_r;
+
+            if pars.plt
+                figure('Name', sprintf('1H fine fit - region %d %s', r, regionLabel(regionList,r)))
+                plot(x_r, y_r, 'k', x_r, outR.fit, 'r', x_r, y_r - outR.fit, 'g')
+                hold on, plot(x_r, outR.baseline, 'b--')
+                legend({'data','fit','residual','baseline'})
+                set(gca,'xdir','reverse')
+                title(sprintf('Step 2: Fine VARPRO fit (region %d: %s)', r, regionLabel(regionList,r)))
+
+                % per-component diagnostic plots (overlay + per-peak gallery),
+                % mirroring the 31P basisVarpro plots
+                rLbl    = regionLabel(regionList, r);
+                pkNames = pars.peaks.name(sel);
+                ttl     = sprintf('1H fit - region %d: %s', r, rLbl);
+                fOv = plot_varpro_1h(x_r, y_r, outR, pkNames, ttl);
+                set(fOv, 'Name', sprintf('1H varpro fit - region %d %s', r, rLbl));
+                fGl = plot_componentSpectra_1h(x_r, y_r, outR, pkNames, ttl);
+                set(fGl, 'Name', sprintf('1H component spectra - region %d %s', r, rLbl));
+            end
         end
-        pars.fit.baselineOpt.weights = fitWeights;
 
-        % phase bounds straddle 0 — spectrum is now corrected
-        if isfield(pars.fit,'lineShapeOpt')
-            fitOutput = curvefitAuto_varproBaseline(x, y, pars.fit.mode, ...
-                amp0, center0, width0, pars.fit.ph_range, minw, ...
-                pars.fit.baselineOpt, pars.fit.lineShapeOpt);
+        % union window axis for combined storage
+        allRanges = cat(1, regionList.fitRange);
+        unionInds = find(ppm > min(allRanges(:)) & ppm < max(allRanges(:)));
+        x = ppm(unionInds);
+
+        % reconstruct a flat peak-ordered pars/lb/ub when all regions share
+        % one lineshape mode (peak blocks only; per-region lineshape kernels
+        % and full detail live in output.met.fit.region(r).fit)
+        if all(modesUsed == modesUsed(1))
+            switch modesUsed(1)
+                case {1,2,6}, nBlk = 3;
+                case {3,4},   nBlk = 4;
+                case 7,       nBlk = 5;
+                case 5,       nBlk = 6;
+                otherwise,    nBlk = 3;
+            end
+            parsFlat = zeros(1, nBlk*npks);
+            lbFlat   = zeros(1, nBlk*npks);
+            ubFlat   = zeros(1, nBlk*npks);
+            for r = 1:nRegions
+                sel = regSel{r}; n_r = numel(sel);
+                for b = 1:nBlk
+                    blk = (b-1)*n_r + (1:n_r);
+                    parsFlat((b-1)*npks + sel) = regFitStore{r}.pars(blk);
+                    lbFlat((b-1)*npks + sel)   = regFitStore{r}.lb(blk);
+                    ubFlat((b-1)*npks + sel)   = regFitStore{r}.ub(blk);
+                end
+            end
+            parnamesFlat = regFitStore{1}.parnames(1:nBlk);
         else
-            fitOutput = curvefitAuto_varproBaseline(x, y, pars.fit.mode, ...
-                amp0, center0, width0, pars.fit.ph_range, minw, ...
-                pars.fit.baselineOpt);
+            parsFlat = []; lbFlat = []; ubFlat = []; parnamesFlat = {};
         end
 
-        if pars.plt
-            figure
-            plot(x, real(y), 'k', x, fitOutput.fit, 'r', x, real(y) - fitOutput.fit, 'g')
-            hold on
-            plot(x, fitOutput.baseline, 'b--')
-            legend({'data','fit','residual','baseline'})
-            set(gca,'xdir','reverse')
-            title('Step 2: Fine VARPRO fit')
+        % store output (peak-ordered to match pars.peaks.name)
+        if useRegions
+            output.met.fit.spec_full = ws;
+        else
+            output.met.fit.spec_full = wsP_store{1};
         end
-
-        % store output
-        output.met.fit.spec_full = ws;
-        output.met.fit.spec = y;
-        output.met.fit.spec_fit = fitOutput.fit;
-        output.met.fit.baseline = fitOutput.baseline;
-        output.met.fit.comp = fitOutput.comp;
-        output.met.fit.pars = fitOutput.pars;
-        output.met.fit.parnames = fitOutput.parnames;
-        output.met.fit.areas = fitOutput.areas;
-        output.met.fit.names = pars.peaks.name;
-        output.met.fit.ppm = x;
-        output.met.fit.lb = fitOutput.lb;
-        output.met.fit.ub = fitOutput.ub;
-        output.met.fit.init.center0 = center0;
-        output.met.fit.init.width0 = width0;
-        output.met.fit.init.ph0 = peakPhases_deg;
-        output.met.fit.coarse.fit = coarseFit.fit;
-        output.met.fit.coarse.baseline = coarseFit.baseline;
-        output.met.fit.weights = fitWeights;
+        output.met.fit.spec      = specFull(unionInds);
+        output.met.fit.spec_fit  = fitFull(unionInds);
+        output.met.fit.baseline  = baseFull(unionInds);
+        output.met.fit.comp      = compAll(unionInds, :);
+        output.met.fit.pars      = parsFlat;
+        output.met.fit.parnames  = parnamesFlat;
+        output.met.fit.areas     = areasAll;
+        % Kernel-aware areas: integrates the convolved per-peak component
+        % (see curvefitAuto_varproBaseline).  When pars.fit.lineShapeOpt is
+        % enabled, `areas` (base-Voigt only) under-counts by the kernel sum;
+        % `areasConv` is the right metric to feed absoluteQuant_svs against
+        % a kernel-aware water area.
+        output.met.fit.areasConv = areasConvAll;
+        output.met.fit.names     = pars.peaks.name;
+        output.met.fit.ppm       = x;
+        output.met.fit.lb        = lbFlat;
+        output.met.fit.ub        = ubFlat;
+        output.met.fit.init.center0 = center0_all;
+        output.met.fit.init.width0  = width0_all;
+        output.met.fit.init.ph0     = ph0_all;
+        output.met.fit.coarse.fit      = coarseStore{1}.fit;
+        output.met.fit.coarse.baseline = coarseStore{1}.baseline;
+        output.met.fit.phaseCorr.pc0   = pcInfo(1).pc0;
+        output.met.fit.phaseCorr.pc1   = pcInfo(1).pc1;
+        output.met.fit.phaseCorr.pivot = center_freq;
+        output.met.fit.coarseMode      = coarseMode;
+        for r = 1:nRegions
+            output.met.fit.region(r).name       = regionLabel(regionList, r);
+            output.met.fit.region(r).fitRange   = regionList(r).fitRange;
+            output.met.fit.region(r).peakSelect = regSel{r};
+            output.met.fit.region(r).peakNames  = pars.peaks.name(regSel{r});
+            output.met.fit.region(r).fit        = regFitStore{r};
+            output.met.fit.region(r).coarse     = coarseStore{r};
+            output.met.fit.region(r).pc0        = pcInfo(r).pc0;
+            output.met.fit.region(r).pc1        = pcInfo(r).pc1;
+        end
 
         % --- Water area estimation ---
         if ~isempty(nws) && isfield(pars,'watfit')
@@ -912,7 +1093,7 @@ if pars.dofit
                 fprintf('  Water area (integrate): %.4g\n', waterArea)
 
                 if pars.plt
-                    figure
+                    figure('Name','1H water integration')
                     plot(xw, yw, 'k', xw, bl, 'b--')
                     hold on
                     area(xw, yw - bl, 'FaceAlpha', 0.3, 'EdgeColor', 'none')
@@ -965,7 +1146,7 @@ if pars.dofit
                 end
 
                 if pars.plt
-                    figure
+                    figure('Name','1H water VARPRO fit')
                     plot(xw, real(yw), 'k', xw, watFitOutput.fit, 'r', xw, real(yw) - watFitOutput.fit, 'g')
                     hold on
                     plot(xw, watFitOutput.baseline, 'b--')
@@ -982,12 +1163,31 @@ if pars.dofit
                 output.wat.fit.pars = watFitOutput.pars;
                 output.wat.fit.parnames = watFitOutput.parnames;
                 output.wat.fit.areas = watFitOutput.areas;
-                output.wat.fit.areaTotal = sum(watFitOutput.areas);
+                if isfield(watFitOutput, 'areasConv')
+                    output.wat.fit.areasConv = watFitOutput.areasConv;
+                else
+                    output.wat.fit.areasConv = watFitOutput.areas;
+                end
+                % areaTotal = canonical kernel-aware water area: sum of the
+                % per-component areasConv (extended-axis trapz of the
+                % convolved component, see curvefitAuto_varproBaseline.m).
+                % Recovers tails past the fit window via lineShapeOpt
+                % .areaPadFactor (default 10).  areaTotalWin is the older
+                % in-window trapz of (fit - baseline), kept for back-compat;
+                % the two agree to a fraction of a percent for Voigt water
+                % but can differ by several percent when the water base is
+                % Lorentzian (mode 3) because 1/x^2 wings converge slowly.
+                % areaBase = sum(ampl .* width) is the legacy base-Voigt
+                % measure.
+                output.wat.fit.areaTotal    = sum(output.wat.fit.areasConv);
+                output.wat.fit.areaTotalWin = trapz(xw(:), watFitOutput.fit(:) - watFitOutput.baseline(:));
+                output.wat.fit.areaBase     = sum(watFitOutput.areas);
                 output.wat.fit.names = wat_peaks_name;
                 output.wat.fit.ppm = xw;
                 output.wat.fit.lb = watFitOutput.lb;
                 output.wat.fit.ub = watFitOutput.ub;
-                fprintf('  Water area (fit): %.4g\n', output.wat.fit.areaTotal)
+                fprintf('  Water area (fit, ext-axis): %.4g  (in-window: %.4g, base-only: %.4g)\n', ...
+                    output.wat.fit.areaTotal, output.wat.fit.areaTotalWin, output.wat.fit.areaBase)
 
             else
                 error('Unknown watfit.method: %s. Use ''integrate'', ''fid'', or ''fit''.', watfit.method)
@@ -1058,7 +1258,7 @@ if pars.dofit
         [yfit,names,areas,ip,ip0,lb,ub] = curvefitMan(x,double(real(y)),minw,pars.fit.mode,pars.fit.peaks);
 
         if pars.plt
-            figure, plot(x,real(y),'k',x,yfit,'r',x,real(y)-yfit,'g'), legend({'data','fit','residual'}), set(gca,'xdir','reverse')
+            figure('Name','1H metabolite fit (manual)'), plot(x,real(y),'k',x,yfit,'r',x,real(y)-yfit,'g'), legend({'data','fit','residual'}), set(gca,'xdir','reverse')
         end
 
         % fit output
@@ -1090,3 +1290,128 @@ fclose('all');
 
 rmpath([thisPath filesep 'mapVBVD']);
 rmpath([thisPath filesep 'utils']);
+
+
+% =================================================================== %
+% local helpers for the multi-region VARPRO pipeline
+% =================================================================== %
+
+function lbl = regionLabel(regionList, r)
+% Region display label: its .name if set, else 'region<r>'.
+    lbl = sprintf('region%d', r);
+    if isfield(regionList, 'name') && ~isempty(regionList(r).name)
+        lbl = regionList(r).name;
+    end
+
+function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
+        ws, ppm, f0, center_freq, fitRange, peakRange, mode, baselineOpt, minw, plt, label, widthInit)
+% Coarse VARPRO fit over a window + phase correction derived from its peaks.
+% Returns the phase-corrected full spectrum (wsP), coarse seeds for the
+% region's peaks (center0/width0/ph0), the applied phase (pc0/pc1), and the
+% coarse fit struct.  Naive seeds: center of each peak range, default width,
+% phase 0; wide phase bounds and relaxed tolerances just to land in the
+% right basin for phase estimation.
+%
+% Optional widthInit (length np vector): per-peak override of the default
+% width0 = 30/f0 seed.  Entries that are <=0 or NaN keep the default.
+    inds = find(ppm > min(fitRange) & ppm < max(fitRange));
+    x = ppm(inds);
+    y = double(real(ws(inds)));
+    np = size(peakRange, 1);
+    center0 = mean(peakRange, 2);
+    width0  = (30/f0) * ones(np, 1);
+    if nargin >= 12 && ~isempty(widthInit)
+        wi = widthInit(:);
+        assert(numel(wi) == np, 'widthInit length must match peakRange rows (%d)', np);
+        m = wi > 0 & ~isnan(wi);
+        width0(m) = wi(m);
+    end
+
+    bo = baselineOpt;
+    bo.centerBounds = peakRange;
+    bo.TolFun = 1e-3;
+    bo.TolX   = 1e-3;
+    aub = zeros(np, 1);
+    for kk = 1:np
+        rng = peakRange(kk,:);
+        li = x > min(rng) & x < max(rng);
+        if any(li)
+            aub(kk) = max(abs(real(y(li))));
+        else
+            aub(kk) = max(abs(real(y)));
+        end
+    end
+    bo.amplUB = aub;
+
+    coarseFit = curvefitAuto_varproBaseline(x, y, mode, ones(np,1), center0, width0, ...
+        [-179 179], minw, bo);
+
+    center0 = coarseFit.pars(np + (1:np))';
+    if mode == 5 || mode == 7
+        ph0    = coarseFit.pars(3*np + (1:np))';
+        width0 = coarseFit.pars(5*np + (1:np))';   % total Voigt width
+    elseif mode == 3 || mode == 4
+        ph0    = coarseFit.pars(3*np + (1:np))';
+        width0 = coarseFit.pars(2*np + (1:np))';
+    else
+        ph0    = zeros(np, 1);
+        width0 = coarseFit.pars(2*np + (1:np))';
+    end
+
+    % linear phase (pc0 + pc1) through this region's peaks
+    if np == 1
+        pc0 = ph0;
+        pc1 = 0;
+    else
+        p   = polyfit(center0(:), ph0(:), 1);
+        pc0 = polyval(p, center_freq);             % 0th order at pivot
+        % shiftSpectrumPhase convention: pc1 is total 1st-order phase
+        % across half the bandwidth
+        pc1 = p(1) * abs(ppm(end) - ppm(1)) / 2;
+    end
+    wsP = shiftSpectrumPhase(ws, [pc0 pc1], ppm, center_freq);
+
+    if plt
+        figure('Name', sprintf('1H coarse fit - %s', label))
+        plot(x, y, 'k', x, coarseFit.fit, 'r', x, y - coarseFit.fit, 'g')
+        hold on, plot(x, coarseFit.baseline, 'b--')
+        legend({'data','coarse fit','residual','baseline'})
+        set(gca,'xdir','reverse')
+        title(sprintf('Coarse VARPRO fit: %s', label))
+    end
+
+function out = nadFineFit(x, y, center0, width0, peakRange, baselineOpt, ...
+        focusRange, focusWeight, mode, ph_range, minw, lineShapeOpt)
+% Fine VARPRO fit for one region: per-peak amplitude upper bounds and center
+% bounds from peakRange, optional focus weighting, and optional shared extra
+% lineshape kernel.  Phase bounds straddle 0 (spectrum already corrected).
+    np = size(peakRange, 1);
+    bo = baselineOpt;
+    bo.centerBounds = peakRange;
+    aub = zeros(np, 1);
+    for kk = 1:np
+        rng = peakRange(kk,:);
+        li = x > min(rng) & x < max(rng);
+        if any(li)
+            aub(kk) = max(abs(real(y(li))));
+        else
+            aub(kk) = max(abs(real(y)));
+        end
+    end
+    bo.amplUB = aub;
+
+    wts = ones(size(x(:)));
+    if ~isempty(focusRange) && focusWeight > 1
+        fi = x(:) > min(focusRange) & x(:) < max(focusRange);
+        wts(fi) = focusWeight;
+    end
+    bo.weights = wts;
+
+    amp0 = ones(np, 1);
+    if ~isempty(lineShapeOpt)
+        out = curvefitAuto_varproBaseline(x, y, mode, amp0, center0, width0, ...
+            ph_range, minw, bo, lineShapeOpt);
+    else
+        out = curvefitAuto_varproBaseline(x, y, mode, amp0, center0, width0, ...
+            ph_range, minw, bo);
+    end

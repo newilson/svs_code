@@ -70,14 +70,14 @@ isUDP   = startsWith(pars.fit.metabs,'UDP');
 isNAD   = ismember(pars.fit.metabs,{'NADH','NADplus'});
 isBroad = startsWith(pars.fit.metabs,'Broad');
 
-shB = 4*repmat([-60 60], nMet, 1);                          % default
-shB(isUDP,:)   = 4*repmat([-6   6],   sum(isUDP),   1);     % ~±0.05 ppm (Ren 2021 prior)
-shB(isNAD,:)   = 4*repmat([-12  12],  sum(isNAD),   1);
+shB = repmat([-30 30], nMet, 1);                          % default
+shB(isUDP,:)   = repmat([-6   6],   sum(isUDP),   1);     % ~±0.05 ppm (Ren 2021 prior)
+shB(isNAD,:)   = repmat([-12  12],  sum(isNAD),   1);
 % shB(isBroad,:) = repmat([-300 300], sum(isBroad), 1);     % ~±2.5 ppm
 % shB(strcmp(pars.fit.metabs,'Broad8_5'),:)  = [-60 60];   % ~±0.5 ppm
 shB(strcmp(pars.fit.metabs,'Broad10_5'),:) = 4*[-300 60]; % keep wide
 
-lbB = repmat([0 100], nMet, 1);                           % default
+lbB = repmat([10 100], nMet, 1);                           % default
 lbB(isUDP,:)   = repmat([15 50], sum(isUDP), 1);           % UDP narrow
 lbB(isNAD,:)   = repmat([15 50], sum(isNAD), 1);           % NAD a bit wider
 lbB(isBroad,:) = repmat([20 200], sum(isBroad), 1);        % allow more flexibility over broad peaks
@@ -86,7 +86,7 @@ lbB(isBroad,:) = repmat([20 200], sum(isBroad), 1);        % allow more flexibil
 %     Default lbLInit=2 Hz violates the UDP/NAD floor (15 Hz) and Broad
 %     floor (50 Hz). Seed each category mid-window so the optimizer starts
 %     interior on every component.
-lbInit = 50  * ones(nMet,1);    % default
+lbInit = 30  * ones(nMet,1);    % default
 lbInit(isUDP)   = 25;           % interior of [15 50]
 lbInit(isNAD)   = 25;
 lbInit(isBroad) = 100;          % interior of [50 200]
@@ -95,6 +95,7 @@ pars.fit.fitOpt.shiftBounds = shB;
 pars.fit.fitOpt.lbLBounds   = lbB;
 pars.fit.fitOpt.lbLInit     = lbInit;
 pars.fit.fitOpt.phaseBounds = [-20 20];
+pars.fit.baselineOpt.linearTol = 1e-8;
 
 % --- soft amplitude-ratio constraints (Ren NMR Biomed 2021 brain UDP fractions)
 sc(1) = struct('idxA','UDPGal',    'idxB','UDPGlcNAc','ratio',0.53,'lambda',1e4);
@@ -115,5 +116,14 @@ tg(1) = struct('members', {{'UDPGlcNAc','UDPGalNAc','UDPGlc','UDPGal'}}, ...
 % pars.fit.tieGroups = tg;
 pars.fit.tieGroups = [];
 
+% --- lineshape kernel to allow asymmetry
+ls = struct('enable',true,'nSide',2,'asymmetric',true,'maxSide',0.5);
+pars.fit.lineShapeOpt = ls;
+
+% print diagnostics
+pars.fit.verbose = true;
+
 %% process
+tic
 [output,pars,fullHdr] = bru2mat_svs31p(pars,bru_dir);
+toc

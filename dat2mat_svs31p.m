@@ -255,7 +255,7 @@ if ~isempty(pars.peaks)
     spec = shiftSpectrumPhase(spec,ph);
 
     if pars.plt
-        figure, plot(ppm,real(sum(spec(:,:),2))), title('after peak-based correction'), set(gca,'xdir','reverse')
+        figure('Name','31P after peak-based correction'), plot(ppm,real(sum(spec(:,:),2))), title('after peak-based correction'), set(gca,'xdir','reverse')
     end
 end
 
@@ -357,6 +357,19 @@ if pars.dofit
         x = ppm(:);
         y = double(spec(:,1));
 
+        % normalize to unit max within the fit window so penalty knobs
+        % (softConstraints lambda, baseline lambda, lambdaAmpl) behave
+        % consistently across datasets.  Linear amplitudes are scale-
+        % invariant; outputs are rescaled back to original units below.
+        % Disabled until lambdas are retuned for the scaled data.
+        % fitInds = (x >= min(pars.fit.ppm_range)) & (x <= max(pars.fit.ppm_range));
+        % yScale  = max(abs(y(fitInds)));
+        % if yScale > 0
+        %     y = y / yScale;
+        % else
+        %     yScale = 1;
+        % end
+
         % --- timing / fit options
         % Anchor phi1's linear-phase ramp at whichever ppm we just used for
         % zero-order phase correction (so phi0 per component only has to
@@ -410,9 +423,25 @@ if pars.dofit
             end
         end
 
+        % --- lineshape options
+        lineShapeOpt = struct();
+        if isfield(pars.fit,'lineShapeOpt'), lineShapeOpt = pars.fit.lineShapeOpt; end
+
         % --- run the fit
         outFit = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, ...
-            timeInfo, fitOpt, baselineOpt);
+            timeInfo, fitOpt, baselineOpt, lineShapeOpt);
+
+        % --- rescale fit outputs back to original data units (paired with
+        % the normalize block above; both are off until lambdas are retuned)
+        % outFit.ampl        = outFit.ampl        * yScale;
+        % outFit.beta        = outFit.beta        * yScale;
+        % outFit.fit         = outFit.fit         * yScale;
+        % outFit.fit_peaks   = outFit.fit_peaks   * yScale;
+        % outFit.baseline    = outFit.baseline    * yScale;
+        % outFit.comp        = outFit.comp        * yScale;
+        % outFit.residualFit = outFit.residualFit * yScale;
+        % outFit.yFit        = outFit.yFit        * yScale;
+        % outFit.yScale      = yScale;
 
         % --- report
         % Displayed amplitudes are scaled by n (number of 31P nuclei) so
@@ -610,7 +639,7 @@ if pars.dofit
             [yfit,names,areas,ip,ip0,lb,ub] = curvefitMan(x,double(real(y)),minw,pars.fit.mode,pars.fit.peaks);
 
             if pars.plt
-                figure, plot(x,real(y),'k',x,yfit,'r',x,real(y)-yfit,'g'), legend({'data','fit','residual'}), set(gca,'xdir','reverse')
+                figure('Name','31P metabolite fit (manual)'), plot(x,real(y),'k',x,yfit,'r',x,real(y)-yfit,'g'), legend({'data','fit','residual'}), set(gca,'xdir','reverse')
             end
 
             % fit output

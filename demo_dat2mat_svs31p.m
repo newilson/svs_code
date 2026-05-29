@@ -108,6 +108,10 @@ tg(1) = struct('members', {{'UDPGlcNAc','UDPGalNAc','UDPGlc','UDPGal'}}, ...
 % pars.fit.tieGroups = tg;
 pars.fit.tieGroups = [];
 
+% --- lineshape kernel to allow asymmetry
+ls = struct('enable',false,'nSide',3,'asymmetric',true,'maxSide',0.3); % INVESTIGATE THIS
+pars.fit.lineShapeOpt = ls;
+
 %% process
 for ii=5%1:length(datfiles)
     curfile = [datfiles(ii).folder filesep datfiles(ii).name];

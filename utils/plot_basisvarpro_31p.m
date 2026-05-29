@@ -30,7 +30,7 @@ if isfield(out,'basisInfo') && ~isempty(out.basisInfo)
 end
 amplDisp = ampl ./ nVec;
 
-fig = figure('Position',[100 100 1100 800]);
+fig = figure('Position',[100 100 1100 800], 'Name','31P basisVarpro fit');
 
 % ---- Top: data + fit + baseline
 ax1 = subplot(3,1,1);

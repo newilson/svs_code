@@ -1,4 +1,4 @@
-function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo, fitOpt, baselineOpt, parametricOpt)
+function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo, fitOpt, baselineOpt, lineShapeOpt, parametricOpt)
 % curvefitAuto_basisVarpro - LCModel/Osprey-style basis-set fitting with
 % variable-projection spline baseline for 31P (or other) MR spectra.
 %
@@ -77,6 +77,20 @@ function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo,
 %                  .shiftBounds, .lbLBounds, .phaseBounds - per-peak bound
 %                                overrides (rows appended in same order as
 %                                .peakPpm)
+%   lineShapeOpt - optional shared spectrum-domain lineshape kernel applied
+%                  to peak basis spectra only (not the spline baseline),
+%                  similar in spirit to LCModel/Osprey extra lineshape
+%                  distortion. Allows asymmetric peak shapes that the
+%                  per-component Lorentzian/Gaussian/phi0 model cannot
+%                  capture. The kernel acts in pixel space.
+%                  .enable      = true/false (default false)
+%                  .nSide       = number of side points on each side of
+%                                 the unit center tap (default 2)
+%                  .asymmetric  = if true, left and right sides have
+%                                 independent coefficients (default false)
+%                  .maxSide     = upper bound for each side coefficient
+%                                 (default 0.5)
+%                  .normalize   = normalize kernel to sum to 1 (default true)
 %
 % Output (fields):
 %   .ampl            - fitted amplitudes [nMet x 1]
@@ -97,7 +111,9 @@ function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo,
 %   .residualFit     - yfit - y on fit range
 %   .softResiduals   - residuals of the soft-constraint rows
 %   .fitIdx          - logical mask of points used in the fit
-%   .fitOpt, .baselineOpt, .parametricOpt, .timeInfo - echoes of inputs
+%   .lineShapePars   - fitted side coefficients of the shared kernel
+%   .lineShapeKernel - shared kernel actually used (vector, length 2*nSide+1)
+%   .fitOpt, .baselineOpt, .parametricOpt, .lineShapeOpt, .timeInfo - echoes of inputs
 %
 % NW - 04/2026
 
@@ -128,7 +144,9 @@ end
 
 if nargin < 6 || isempty(fitOpt),        fitOpt = struct();        end
 if nargin < 7 || isempty(baselineOpt),   baselineOpt = struct();   end
-if nargin < 8 || isempty(parametricOpt), parametricOpt = struct(); end
+if nargin < 9 || isempty(parametricOpt), parametricOpt = struct(); end
+if nargin < 8 || isempty(lineShapeOpt),  lineShapeOpt = struct();  end
+lineShapeOpt = parseLineShapeOpt(lineShapeOpt);
 
 dwell = timeInfo.dwellTime;
 f0    = timeInfo.f0;  % MHz
@@ -350,6 +368,20 @@ if fitOpt.phase1Enable
     parnames{end+1} = 'phi1(deg/ppm)';
 end
 
+% Append optional shared lineshape distortion parameters.  These are
+% global (not per-component) and bypass the tieGroups machinery, so we
+% extend mapToFull with an identity tail covering the kernel side coefs.
+nFreePeak = length(pars0_red);
+[lineShapePars0, lineShapeLb, lineShapeUb, lineShapeParnames] = initLineShapePars(lineShapeOpt);
+nLineShape = length(lineShapePars0);
+if nLineShape > 0
+    pars0_red = [pars0_red lineShapePars0];
+    lb_red    = [lb_red    lineShapeLb];
+    ub_red    = [ub_red    lineShapeUb];
+    mapToFull = [mapToFull nFreePeak + (1:nLineShape)];
+    parnames  = [parnames  lineShapeParnames];
+end
+
 % Full-length echoes for output (each tied follower repeats the leader).
 lb = lb_red(mapToFull);
 ub = ub_red(mapToFull);
@@ -366,8 +398,10 @@ end
 ssrData = sum(abs(w .* yFit).^2);
 relTolFun = 1e-6;
 relTolX   = 1e-9;
+finDiffStep = 1e-8;
 if isfield(fitOpt,'tolFun') && ~isempty(fitOpt.tolFun), relTolFun = fitOpt.tolFun; end
 if isfield(fitOpt,'tolX')   && ~isempty(fitOpt.tolX),   relTolX   = fitOpt.tolX;   end
+if isfield(fitOpt,'finDiffStep') && ~isempty(fitOpt.finDiffStep), finDiffStep = fitOpt.finDiffStep; end
 tolFun = relTolFun * ssrData;
 tolX   = relTolX;
 
@@ -375,6 +409,10 @@ maxIter = 4000;
 if isfield(fitOpt,'maxIter') && ~isempty(fitOpt.maxIter), maxIter = fitOpt.maxIter; end
 
 oldopts = optimset('lsqnonlin');
+% options = optimset(oldopts, 'TolFun', tolFun, 'TolX', tolX, ...
+%     'FinDiffRelStep', finDiffStep, ...
+%     'MaxFunEval', 2000*nPars, 'MaxIter', maxIter, ...
+%     'Display', getDisplayFlag(fitOpt.verbose));
 options = optimset(oldopts, 'TolFun', tolFun, 'TolX', tolX, ...
     'MaxFunEval', 2000*nPars, 'MaxIter', maxIter, ...
     'Display', getDisplayFlag(fitOpt.verbose));
@@ -442,9 +480,20 @@ output.ub.lbL         = ub(nMet+(1:nMet));
 output.ub.lbG         = ub(2*nMet+(1:nMet));
 output.ub.phase0      = ub(3*nMet+(1:nMet));
 if fitOpt.phase1Enable
-    output.lb.phase1 = lb(end);
-    output.ub.phase1 = ub(end);
+    output.lb.phase1 = lb(4*nMet + 1);
+    output.ub.phase1 = ub(4*nMet + 1);
 end
+% Lineshape side coefs (live at the tail of ip_full / lb / ub).
+if nLineShape > 0
+    output.lineShapePars   = ip_nonlin(end - nLineShape + 1 : end);
+    output.lineShapeKernel = buildLineShapeKernelLocal(output.lineShapePars, lineShapeOpt);
+    output.lb.lineShape    = lb(end - nLineShape + 1 : end);
+    output.ub.lineShape    = ub(end - nLineShape + 1 : end);
+else
+    output.lineShapePars   = [];
+    output.lineShapeKernel = 1;
+end
+output.lineShapeParnames = lineShapeParnames;
 output.parnames       = parnames;
 output.residualFit    = yfit - yFit;
 output.softResiduals  = softRes;
@@ -454,6 +503,7 @@ output.yFit           = yFit;
 output.fitOpt         = fitOpt;
 output.baselineOpt    = baselineOpt;
 output.parametricOpt  = parametricOpt;
+output.lineShapeOpt   = lineShapeOpt;
 output.timeInfo       = timeInfo;
 output.nBasis         = nBasis;
 output.nParam         = nParam;
@@ -478,7 +528,7 @@ output.basisInfo      = basisInfo;
     end
 
     function [Apk, fidMod] = buildApeak(ip)
-        [shift, lbL, lbG, phi0, phi1] = unpackPars(ip);
+        [shift, lbL, lbG, phi0, phi1, sidePars] = unpackPars(ip);
 
         % Time-domain modulation (broadcast)
         % fid_mod(t,k) = fid(t,k) .* exp(1i*2*pi*shift(k)*t)
@@ -519,6 +569,20 @@ output.basisInfo      = basisInfo;
             ppmRel = x - timeInfo.ppmPivot;
             phaseRamp = exp(-1i * phi1 * ppmRel * pi/180);
             specOnData = specOnData .* phaseRamp;
+        end
+
+        % Apply optional shared lineshape kernel (peak basis only — the
+        % spline baseline is unaffected because it lives in B and is
+        % solved separately in solveLinearBlock).  Convolution is run on
+        % the full N-length spectrum so that 'same' edge effects fall
+        % outside the fit window.
+        if lineShapeOpt.enable && nLineShape > 0
+            kern = buildLineShapeKernel(sidePars);
+            if numel(kern) > 1
+                for kk = 1:nMet
+                    specOnData(:,kk) = conv(specOnData(:,kk), kern, 'same');
+                end
+            end
         end
 
         % Restrict to fit range
@@ -611,15 +675,48 @@ output.basisInfo      = basisInfo;
         end
     end
 
-    function [shift, lbL, lbG, phi0, phi1] = unpackPars(ip)
+    function [shift, lbL, lbG, phi0, phi1, sidePars] = unpackPars(ip)
         shift = ip(1:nMet);
         lbL   = ip(nMet + (1:nMet));
         lbG   = ip(2*nMet + (1:nMet));
         phi0  = ip(3*nMet + (1:nMet));
         if fitOpt.phase1Enable
             phi1 = ip(4*nMet + 1);
+            offset = 4*nMet + 1;
         else
             phi1 = 0;
+            offset = 4*nMet;
+        end
+        if length(ip) > offset
+            sidePars = ip(offset+1:end);
+        else
+            sidePars = [];
+        end
+    end
+
+    function kern = buildLineShapeKernel(sidePars)
+        if ~lineShapeOpt.enable || isempty(sidePars)
+            kern = 1;
+            return
+        end
+        nSide = lineShapeOpt.nSide;
+        sidePars = max(0, sidePars(:));
+        if lineShapeOpt.asymmetric
+            left  = sidePars(1:nSide);
+            right = sidePars(nSide + (1:nSide));
+        else
+            left  = sidePars(1:nSide);
+            right = left;
+        end
+        kern = [flipud(left); 1; right];
+        if lineShapeOpt.normalize
+            s = sum(kern);
+            if ~isfinite(s) || s <= 0
+                kern = zeros(size(kern));
+                kern(nSide+1) = 1;
+            else
+                kern = kern / s;
+            end
         end
     end
 
@@ -844,5 +941,75 @@ function flag = getDisplayFlag(verboseFlag)
         flag = 'iter';
     else
         flag = 'off';
+    end
+end
+
+function opt = parseLineShapeOpt(opt)
+    if ~isfield(opt,'enable') || isempty(opt.enable)
+        opt.enable = false;
+    end
+    if ~isfield(opt,'nSide') || isempty(opt.nSide)
+        opt.nSide = 2;
+    end
+    if ~isfield(opt,'asymmetric') || isempty(opt.asymmetric)
+        opt.asymmetric = false;
+    end
+    if ~isfield(opt,'maxSide') || isempty(opt.maxSide)
+        opt.maxSide = 0.50;
+    end
+    if ~isfield(opt,'normalize') || isempty(opt.normalize)
+        opt.normalize = true;
+    end
+    if opt.nSide < 0 || round(opt.nSide) ~= opt.nSide
+        error('lineShapeOpt.nSide must be a nonnegative integer');
+    end
+    if opt.maxSide < 0
+        error('lineShapeOpt.maxSide must be >= 0');
+    end
+end
+
+function [pars0, lb0, ub0, names] = initLineShapePars(opt)
+    if ~opt.enable || opt.nSide == 0
+        pars0 = []; lb0 = []; ub0 = []; names = {};
+        return
+    end
+    if opt.asymmetric
+        nls = 2 * opt.nSide;
+        pars0 = zeros(1, nls);
+        lb0   = zeros(1, nls);
+        ub0   = opt.maxSide * ones(1, nls);
+        names = {'lineShapeLeft','lineShapeRight'};
+    else
+        nls = opt.nSide;
+        pars0 = zeros(1, nls);
+        lb0   = zeros(1, nls);
+        ub0   = opt.maxSide * ones(1, nls);
+        names = {'lineShape'};
+    end
+end
+
+function kern = buildLineShapeKernelLocal(sidePars, opt)
+    % Mirror of the nested buildLineShapeKernel for use after lsqnonlin
+    % returns (when nested-function workspace is no longer accessible).
+    if ~opt.enable || isempty(sidePars)
+        kern = 1; return
+    end
+    nSide = opt.nSide;
+    sidePars = max(0, sidePars(:));
+    if opt.asymmetric
+        left  = sidePars(1:nSide);
+        right = sidePars(nSide + (1:nSide));
+    else
+        left  = sidePars(1:nSide);
+        right = left;
+    end
+    kern = [flipud(left); 1; right];
+    if opt.normalize
+        s = sum(kern);
+        if ~isfinite(s) || s <= 0
+            kern = zeros(size(kern)); kern(nSide+1) = 1;
+        else
+            kern = kern / s;
+        end
     end
 end

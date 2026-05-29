@@ -115,7 +115,7 @@ end
 % Initial guesses
 if nargin<6 || isempty(amp0) || isempty(center0) || isempty(width0)
     [~,center,width,amp] = findpeaks(y,x);
-    figure, plot(x,y,'-k',center,amp,'*r')
+    figure('Name','Auto peak detection (findpeaks)'), plot(x,y,'-k',center,amp,'*r')
     n = length(center);
 else
     amp = amp0(:)';
@@ -278,6 +278,19 @@ else
     end
 end
 
+% Optional per-peak phase bounds [n x 2] (deg), overriding the uniform ph_range
+% for the phase block (modes 3/4/5).  Used e.g. to keep broad macromolecular
+% components near-absorptive while leaving the narrow peaks free.
+if isfield(baselineOpt,'phaseBounds') && ~isempty(baselineOpt.phaseBounds) ...
+        && (mode==3 || mode==4 || mode==5)
+    pb = baselineOpt.phaseBounds;
+    if size(pb,1)==1, pb = repmat(pb, n, 1); end
+    idx = 2*n + (1:n);
+    lb(idx) = pb(:,1).';
+    ub(idx) = pb(:,2).';
+    pars(idx) = min(max(pars(idx), lb(idx)), ub(idx));
+end
+
 % Append optional shared lineshape distortion parameters
 nPeakPars = length(pars);
 [lineShapePars0, lineShapeLb, lineShapeUb, lineShapeParnames] = initLineShapePars(lineShapeOpt);
@@ -286,6 +299,11 @@ if ~isempty(lineShapePars0)
     lb   = [lb   lineShapeLb];
     ub   = [ub   lineShapeUb];
 end
+
+% safety: keep every initial guess strictly within its bounds.  Broad
+% components (wide widthBounds) or edge cases can otherwise seed widthL/widthG
+% outside [widthmin widthmax]; this is a no-op when seeds are already valid.
+pars = min(max(pars, lb), ub);
 
 %% solve
 if size(x)==size(y'), y = y'; end
@@ -423,6 +441,49 @@ output.pars = ip;
 output.lb = lbout;
 output.ub = ubout;
 output.areas = areas;
+% Kernel-aware per-peak area: integrate the convolved component on an
+% EXTENDED x-axis so peaks near the fit window edge keep their tails.
+% Why extend?  trapz over the fit window alone under-counts a peak's
+% area when the peak sits close to the window edge -- Voigt tails decay
+% slowly and the lineshape kernel adds further shoulder mass.  Rebuilding
+% the basis on a wider axis using the SAME fitted parameters + kernel
+% recovers the missing tail without re-running the optimizer.
+%
+% The pad is `areaPadFactor * maxWidth` on each side; for Voigt/Gaussian
+% the "width" used here is the full FWHM-like measure (widthL+widthG for
+% Voigt) so the pad grows with the broadest fitted peak.  When the kernel
+% is normalized to sum=1 (the default), in the infinite-window limit
+% `areasConv` converges to the analytic peak integral -- the per-peak
+% factor vs `areas` becomes a constant set only by the basis function's
+% normalization, so cross-peak ratios are restored.
+if isfield(lineShapeOpt,'areaPadFactor') && ~isempty(lineShapeOpt.areaPadFactor)
+    padFactor = lineShapeOpt.areaPadFactor;
+else
+    padFactor = 10;
+end
+switch mode
+    case 1, basisFn = @gaussian_basis;            wRefAll = abs(ip_nonlin((1:n)+n));
+    case 2, basisFn = @lorentzian_basis;          wRefAll = abs(ip_nonlin((1:n)+n));
+    case 3, basisFn = @lorentzian_complex_basis;  wRefAll = abs(ip_nonlin((1:n)+n));
+    case 4, basisFn = @gaussian_complex_basis;    wRefAll = abs(ip_nonlin((1:n)+n));
+    case 5, basisFn = @voigt_complex_basis;       wRefAll = Acoef*abs(ip_nonlin((1:n)+n)) + abs(ip_nonlin((1:n)+3*n));
+    case 6, basisFn = @lorentzian_magnitude_basis;wRefAll = abs(ip_nonlin((1:n)+n));
+    case 7, basisFn = @voigt_magnitude_basis;     wRefAll = Acoef*abs(ip_nonlin((1:n)+n)) + abs(ip_nonlin((1:n)+2*n));
+    otherwise, basisFn = []; wRefAll = abs(width(:));
+end
+if ~isempty(basisFn)
+    padX     = padFactor * max(wRefAll);
+    dxIn     = mean(abs(diff(x)));
+    xExt     = ((min(x) - padX) : dxIn : (max(x) + padX)).';
+    ApeakExt = basisFn(ip_nonlin, xExt);             % kernel applied inside
+    y_comp_ext = ApeakExt .* ampl(:).';
+    output.areasConv = trapz(xExt, real(y_comp_ext), 1);
+    output.areasConvPad = padX;                      % for diagnostics
+else
+    % Unknown mode: fall back to in-window trapz of the post-kernel comp.
+    output.areasConv = trapz(x(:), real(y_comp), 1);
+    output.areasConvPad = 0;
+end
 output.fit = yfit;
 output.fit_peaks = yfit - baseline;
 output.baseline = baseline;

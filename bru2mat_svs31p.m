@@ -102,7 +102,7 @@ t = (0:npts-1)*1/bw;
 hz = (-1/2:1/npts:1/2-1/npts)*bw;
 % hz = (1/2:-1/npts:-1/2+1/npts)*bw;
 ppm = hz/f0;
-ppm = ppm + adcshift;
+ppm = ppm + adcshift/f0;
 
 disp('filtering')
 fid = expFilter(t,pars.lb,fid);
@@ -290,6 +290,18 @@ if pars.dofit
         x = ppm(:);
         y = double(spec(:,1));
 
+        % normalize to unit max within the fit window so penalty knobs
+        % (softConstraints lambda, baseline lambda, lambdaAmpl) behave
+        % consistently across datasets.  Linear amplitudes are scale-
+        % invariant; outputs are rescaled back to original units below.
+        fitInds = (x >= min(pars.fit.ppm_range)) & (x <= max(pars.fit.ppm_range));
+        yScale  = max(abs(y(fitInds)));
+        if yScale > 0
+            y = y / yScale;
+        else
+            yScale = 1;
+        end
+
         % --- timing / fit options
         % Anchor phi1's linear-phase ramp at whichever ppm we just used for
         % zero-order phase correction (so phi0 per component only has to
@@ -343,9 +355,24 @@ if pars.dofit
             end
         end
 
+        % --- lineshape options
+        lineShapeOpt = struct();
+        if isfield(pars.fit,'lineShapeOpt'), lineShapeOpt = pars.fit.lineShapeOpt; end
+
         % --- run the fit
         outFit = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, ...
-            timeInfo, fitOpt, baselineOpt);
+            timeInfo, fitOpt, baselineOpt, lineShapeOpt);
+
+        % --- rescale fit outputs back to original data units
+        outFit.ampl        = outFit.ampl        * yScale;
+        outFit.beta        = outFit.beta        * yScale;
+        outFit.fit         = outFit.fit         * yScale;
+        outFit.fit_peaks   = outFit.fit_peaks   * yScale;
+        outFit.baseline    = outFit.baseline    * yScale;
+        outFit.comp        = outFit.comp        * yScale;
+        outFit.residualFit = outFit.residualFit * yScale;
+        outFit.yFit        = outFit.yFit        * yScale;
+        outFit.yScale      = yScale;
 
         % --- report
         % Displayed amplitudes are scaled by n (number of 31P nuclei) so

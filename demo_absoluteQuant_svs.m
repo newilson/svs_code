@@ -50,8 +50,20 @@ pars.dofit = 'varpro';
 pars.fit.mode = 5; % Voigt
 pars.fit.ppm_range = [8.7 10.0];
 pars.fit.ph_range = [-60 60];
-pars.peaks.name  = {'NADH2','NADH6','NADH4'};
-pars.peaks.range = [9.25 9.45; 9.05 9.25; 8.8 9.05];
+pars.peaks.name  = {'NADH2','NADH6','NADH4','Trp'};
+pars.peaks.range = [9.25 9.45; 9.05 9.25; 8.8 9.05; 10.05 10.15];
+
+% Two independent fit regions: the NAD+ cluster and a narrow Tryptophan
+% (Trp) singlet at ~10.1 ppm.  Each region runs its own coarse->phase->fine
+% fit (coarseMode 'perRegion'), so Trp is fit and phased independently of
+% NAD and does not perturb the NAD fit.
+pars.fit.coarseMode = 'perRegion';
+pars.fit.regions(1).fitRange = [8.7 10.0];
+pars.fit.regions(1).peaks    = {'NADH2','NADH6','NADH4'};
+pars.fit.regions(1).name     = 'NAD';
+pars.fit.regions(2).fitRange = [9.95 10.30];   % fairly narrow, around 10.1
+pars.fit.regions(2).peaks    = {'Trp'};
+pars.fit.regions(2).name     = 'Trp';
 
 pars.fit.baselineOpt.enable = true;
 pars.fit.baselineOpt.knotSpacing = 2;
@@ -101,10 +113,11 @@ voxel.tissues(3).flag_metSig = false;   % CSF excluded from metabolite volume
 
 % --- NAD+ T1/T2 per peak from Swago et al., NBM 2025 (Table 2 means) ---
 % Single aromatic proton per peak (H2, H6, H4 of nicotinamide).
-met_T1_ms   = [205.6, 211.6, 237.3];   % NADH2, NADH6, NADH4
-met_T2_ms   = [ 33.6,  29.1,  42.3];
-met_nProt   = [    1,     1,     1];
-peakNames   = {'NADH2','NADH6','NADH4'};
+% Trp: indole NH proton (1H) at 10.1 ppm; T1/T2 set to 100/10 ms.
+met_T1_ms   = [205.6, 211.6, 237.3, 100];   % NADH2, NADH6, NADH4, Trp
+met_T2_ms   = [ 33.6,  29.1,  42.3,  10];
+met_nProt   = [    1,     1,     1,   1];
+peakNames   = {'NADH2','NADH6','NADH4','Trp'};
 nPeaks = numel(peakNames);
 
 % =====================================================================
