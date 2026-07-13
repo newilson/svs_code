@@ -41,15 +41,14 @@ fprintf('NWS : %s\n', nwsDir);
 % Processing/Fitting parameters (same recipe as processU01_Calf_1H.m)
 % =====================================================================
 pars = struct();
-pars.lb_met  = 3;
-pars.lb_wat  = 3;
-pars.eccopt  = 0;
+pars.lb_met  = 6;
+pars.lb_wat  = 6;
+pars.eccopt  = 0;  % 0 = Klose (water-phase divide); restored to original f_water in bru2mat_svsNAD
 pars.PC      = 0;
 pars.base    = nan;
 pars.plt     = plt;
 pars.pltSpec = plt;
 
-pars.center_freq  = 4.72;
 pars.initPhDeg    = 0;       % initial zero-order phase guess (degrees)
 pars.initPPMShift = 0;       % initial chemical-shift offset (ppm)
 
@@ -61,12 +60,13 @@ pars.WatSupPost.opts.hsvd.bounds = [-1 1] * 300/8000;
 pars.WatSupPost.opts.hsvd.nsin   = 25;
 
 pars.dofit         = 'varpro';
-pars.fit.mode      = 5;                 % Voigt
-pars.fit.ppm_range = [8.9 10.3];
+pars.fit.mode      = 5;                 % Lorentzian
+pars.fit.ppm_range = [8.9 10.3];        % stops ABOVE the steep 8.55-9.0 aromatic envelope (and NAD+ H4 ~8.74) so the stiff baseline below stays well-behaved (validated via relaxometry run_t2relax_narrow)
+
 % NOTE: wide phase range is intentional.  Tightening ph_range to [-15 15]
 % (and/or making lineShapeOpt symmetric / lowering its maxSide) makes the
 % per-component figures LOOK cleaner -- pure-absorptive peaks, baseline no
-% longer floats above the data -- but degrades NADH2:NADH6:NADH4 self-
+% longer floats above the data -- but degrades NADH2:NADH6 self-
 % consistency across averages/sessions.  The wide phase + asymmetric
 % lineShape kernel are absorbing real systematic distortion (eddy currents,
 % B0 asymmetry, residual phase drift); take that freedom away and the
@@ -74,51 +74,97 @@ pars.fit.ppm_range = [8.9 10.3];
 % proton unequally.  Do not narrow without re-verifying NAD self-
 % consistency.  See feedback-nad-1h-phase-and-lineshape-stay-wide.
 pars.fit.ph_range  = [-60 60];
-% NAD peak windows shifted +0.05-0.1 ppm relative to brain/calf to track
-% the observed positions in whole blood (the brain windows leave each NAD
-% peak hugging the upper-ppm boundary, with amplitudes pegged tiny).
-% Revise once Bruker blood NAD chemical shifts are nailed down.
-pars.peaks.name    = {'NADH2','NADH6','NADH4','Trp'};
-pars.peaks.range   = [9.35 9.55; 9.20 9.35; 8.90 9.20; 9.90 10.20];
-% Per-peak FINE-fit width seed (ppm).  Default (NAN / <=0) keeps the coarse-
-% fitted width; explicit value forces the fine optimizer to start there.
-% Trp on blood parks in a narrow local minimum during the NAD-dominant
-% coarse fit; seeding it wider escapes that basin.  0.25 ppm overshot,
-% 0.15 ppm lands closer to the visible Trp FWHM at 500 MHz.
-pars.peaks.widthInit = [NaN; NaN; NaN; 0.15];
 
-% Two-region alternative (NAD cluster vs narrow Trp window) is documented
-% in processU01_Brain_1H.m if local-baseline isolation is needed.  Default
-% is a single wide region covering NAD + Trp, like the brain wrapper.
+% ---------------------------------------------------------------------
+% Metabolite model.  Optimized across the rbnmr blood datasets
+% (Human_Blood_{3,5,6,8,11,12}); harness + diagnostics in _blood_opt/.
+%
+%  * SINGLE BROAD Trp.  The blood Trp feature is one broad ~0.12-0.18 ppm
+%    blob (sometimes with a faint doublet shoulder); a single Voigt captures
+%    its AREA robustly.  The earlier narrow TrpA/TrpB doublet was abandoned:
+%    on these datasets the blob is broad, so the narrow pair pinned at its
+%    width/range walls and undershot.
+%  * NADH2 (~9.2-9.45) and NADH6 (~9.0-9.2) are the two PROMINENT NAD+ peaks.
+%    Broad9_4 is a separate MINOR shoulder near ~9.5-9.6 (it is never one of
+%    the 9.2/9.4 peaks).  The 'Broad' prefix routes Broad9_4 through the
+%    broad-component path: excluded from the coarse phase fit, seeded broad,
+%    re-added as a free component in the FINE fit, still quantified per-peak.
+% ---------------------------------------------------------------------
+pars.peaks.name    = {'Broad9_4','NADH2','NADH6','Trp'};
+pars.peaks.range   = [9.50 9.70; 9.22 9.48; 9.00 9.22; 9.90 10.20];
+
+% Per-peak FINE-fit width seed (ppm), aligned with pars.peaks.name
+% {Broad9_4,NADH2,NADH6,Trp}.  NaN keeps the coarse-fitted width; Trp is
+% seeded broad (0.10 ppm) so the fine fit starts inside the broad blob rather
+% than a narrow local minimum.  Length MUST equal numel(pars.peaks.name)
+% (bru2mat_svsNAD asserts this).
+pars.peaks.widthInit = [NaN; NaN; NaN; 0.10];
+
+% DATA-DRIVEN per-dataset re-seeding of the NAD/Trp center ranges.  The
+% downfield referencing drifts ~0.15 ppm between sessions; that drift parks a
+% NAD component in a valley and the >=0 amplitude solve in the fitter then
+% NULLS it (the "NADH6 collapse").  For each listed peak, bru2mat_svsNAD finds
+% the strongest peak of the background-subtracted spectrum within 'search' and
+% tightens that peak's range to detection +/- 'halfWidth'.  The NADH6/NADH2
+% split at 9.23 separates the two NAD peaks in every dataset (NADH6 <=9.20,
+% NADH2 >=9.25).  Broad9_4 is NOT auto-seeded (kept at its fixed ~9.5-9.7
+% window so it cannot wander onto a NAD peak).
+pars.peaks.autoSeed.enable      = true;
+pars.peaks.autoSeed.bgSmoothPPM = 0.30;
+pars.peaks.autoSeed.peaks = struct( ...
+    'name',      {'NADH6',      'NADH2',      'Trp'        }, ...
+    'search',    {[9.00 9.23],  [9.23 9.50],  [9.86 10.20] }, ...
+    'halfWidth', {0.07,         0.07,         0.13         });
+
+% SINGLE region spanning NAD + Trp.  One region matters: the strong Trp blob
+% anchors the coarse phase line, so the derived phase correction is near
+% identity and the NAD region stays absorptive.  A separate NAD-only region
+% phases off just 2 peaks, mis-estimates the phase, and rotates the NAD peaks
+% dispersive -- whose >=0 amplitudes then null.
 pars.fit.coarseMode = 'perRegion';
-% pars.fit.regions(1).fitRange = [8.9 10.0];
-% pars.fit.regions(1).peaks    = {'NADH2','NADH6','NADH4'};
-% pars.fit.regions(1).name     = 'NAD';
-% pars.fit.regions(2).fitRange = [9.85 10.3];   % narrow, around 10.05
-% pars.fit.regions(2).peaks    = {'Trp'};
-% pars.fit.regions(2).name     = 'Trp';
 pars.fit.regions(1).fitRange = [8.9 10.3];
-pars.fit.regions(1).peaks    = {'NADH2','NADH6','NADH4','Trp'};
+pars.fit.regions(1).peaks    = {'NADH2','NADH6','Trp','Broad9_4'};
 pars.fit.regions(1).name     = 'NAD/Trp';
 
 pars.fit.baselineOpt.enable      = true;
-pars.fit.baselineOpt.knotSpacing = 2;
+% knotSpacing 0.5 (moderately stiff).  The [8.9 10.3] window stops ABOVE the
+% steep 8.55-9.0 aromatic envelope, so the in-band background is gentle and a
+% stiff spline tracks it cleanly -- no wiggle for peak tails to trade area with.
+% Validated on the relaxometry data (run_t2relax_narrow): this range+stiffness
+% gives a smooth baseline and a stable NADH6.  Do NOT widen the window below
+% ~8.9 at this stiffness -- the steep envelope then needs a flexible
+% (knot <= 0.25) spline or it leaks into the peaks (and would re-require H4).
+pars.fit.baselineOpt.knotSpacing = 0.5;
 pars.fit.baselineOpt.lambda      = 1;
 pars.fit.baselineOpt.lambdaAmpl  = 0;
 pars.fit.baselineOpt.TolFun      = 1e-6;
-% Per-peak linewidth bounds (ppm).  NAD trio caps at 0.25 ppm (~125 Hz at
-% 500 MHz); Trp gets a wider 0.6 ppm cap because the indole NH at ~10.1 ppm
-% is in fast exchange with water in whole blood and can carry a few-hundred-
-% Hz line.  Row order matches pars.peaks.name = {NADH2, NADH6, NADH4, Trp}.
-pars.fit.baselineOpt.widthBounds = [0.02 0.25; ...
-                                    0.02 0.25; ...
-                                    0.02 0.25; ...
-                                    0.02 0.60];
+% Per-peak linewidth bounds (ppm).  Row order matches pars.peaks.name =
+% {Broad9_4, NADH2, NADH6, Trp}.  NAD peaks cap at 0.20 ppm; Trp is allowed
+% broad (up to 0.25 ppm) to fill the blob.  The Broad9_4 row is a placeholder:
+% the 'Broad' prefix makes bru2mat_svsNAD override it with the broad-component
+% width bounds set in pars.fit.broadWidthBounds below.
+pars.fit.baselineOpt.widthBounds = [0.02  0.25; ...   % Broad9_4 (overridden by broad bounds)
+                                    0.02  0.20; ...   % NADH2
+                                    0.02  0.20; ...   % NADH6
+                                    0.03  0.25];      % Trp (broad)
 
-% NOTE: asymmetric shared lineshape kernel is intentional -- see the wide
-% ph_range comment above.  Together they absorb real systematic line
-% distortion; constraining either degrades NAD self-consistency.
-pars.fit.lineShapeOpt.enable     = true;
+% Broad-component (Broad9_4) width control.  bru2mat_svsNAD's defaults
+% ([65/f0 180/f0] = 65-180 Hz, init 150 Hz) were tuned for the 7T in-vivo
+% macromolecular baseline and are far too broad for high-field blood: a
+% ~150 Hz line at 9.5 ppm leaks into NADH2 and steals NAD area.  Constrain it
+% to "a bit broader than NAD, not macromolecular" -- at 600 MHz these are
+% ~24-90 Hz bounds, ~42 Hz init.  Both are in ppm.
+pars.fit.broadWidthBounds = [0.04 0.15];   % ppm  (~24-90 Hz @ 600 MHz)
+pars.fit.broadWidthInit   = 0.07;          % ppm  (~42 Hz @ 600 MHz)
+
+% Shared lineshape kernel DISABLED for blood.  The asymmetric kernel is
+% intentional for the in-vivo (brain/calf) pipeline -- it absorbs gradient
+% eddy-current / B0 line distortion -- but the high-field NMR blood lines are
+% clean and well-phased, so the kernel adds no benefit and slightly raises the
+% residual (sweep: kernel-off mean score 0.147 vs 0.159 kernel-on across the 6
+% datasets).  The wide ph_range above is kept.  See
+% feedback-nad-1h-phase-and-lineshape-stay-wide (which is in-vivo-specific).
+pars.fit.lineShapeOpt.enable     = false;
 pars.fit.lineShapeOpt.nSide      = 4;
 pars.fit.lineShapeOpt.asymmetric = true;
 pars.fit.lineShapeOpt.maxSide    = 0.50;
@@ -126,28 +172,44 @@ pars.fit.lineShapeOpt.maxSide    = 0.50;
 pars.fit.hsvdClean.enable = false;
 
 pars.watfit.method    = 'fit';
-pars.watfit.nComp     = 1;                          % single peak; initial width set inside bru2mat_svsNAD
 pars.watfit.ppm_range = [4 5.5];
-% Water base is pure Lorentzian (mode 3): 1/x^2 wings reach the broad
-% pedestal the Voigt (mode 5) Gaussian component pulls inward.  Verified
-% against demo_bru2mat_svsNAD on Human_Blood_1; the wide symmetric
-% lineshape kernel below handles the residual shoulder structure.
-pars.watfit.mode      = 3;                          % 3 = Lorentzian (complex)
-% Inherit baselineOpt from the metabolite fit but allow water to be much
-% wider than NAD peaks (radiation damping / exchange give blood water a
-% substantial broad pedestal that the metabolite cap can't reach).  The
-% initial width is set inside bru2mat_svsNAD (default 0.1 ppm, matched to
-% the visible water FWHM at 500 MHz); override via pars.watfit.widthInit.
-pars.watfit.baselineOpt = pars.fit.baselineOpt;
-pars.watfit.baselineOpt.widthBounds = [0.02 1.0];   % ~10-500 Hz at 500 MHz
 
-% Symmetric lineshape kernel models the broad water pedestal on top of the
-% narrow Lorentzian core.  See demo_bru2mat_svsNAD.m for tuning notes.
-pars.watfit.widthInit = 0.05;                       % narrow base Voigt; kernel adds shoulders
-pars.watfit.lineShapeOpt.enable     = true;
-pars.watfit.lineShapeOpt.nSide      = 15;
-pars.watfit.lineShapeOpt.asymmetric = false;
-pars.watfit.lineShapeOpt.maxSide    = 1.0;
+% Two-component Lorentzian water model: blood water is super-Lorentzian
+% (a sharp ~0.029 ppm core sitting on heavier-than-Lorentzian wings).
+% Physically this is a DISTRIBUTION of Lorentzians -- intra/extracellular
+% (plasma vs RBC) compartments with different susceptibility/T2*, plus
+% voxel B0 spread -- NOT the dipolar semisolid super-Lorentzian (water is
+% mobile, so residual dipolar coupling averages to zero).  A single
+% component (Voigt or Lorentzian) structurally cannot match both the sharp
+% cusp and the heavy wings: one amplitude locks the core:wing ratio, so it
+% undershoots the apex 30-40% and leaves a bipolar derivative-shaped
+% residual at the apex.  TWO co-located Lorentzians (narrow core + broad
+% pedestal, both pinned ON the water line) resolve it: peak residual drops
+% from ~0.40 to ~0.018 of apex.  Components stay separated and stable via
+% three controls below: (1) co-located init, (2) NON-OVERLAPPING per-
+% component width bounds, (3) tight per-component center bounds.  No
+% lineshape kernel -- the broad component already supplies the pedestal;
+% adding a kernel on top is redundant and drives the broad Lorentzian to
+% its width bound while its area collapses (verified).
+pars.watfit.mode      = 3;                          % 3 = Lorentzian (complex)
+pars.watfit.nComp     = 2;                          % narrow core + broad pedestal
+
+pars.watfit.twoStagePhase = false;                  % no kernel => no warm-start needed
+
+% Co-located seeds + tight, per-component bounds.  Both components start ON
+% the water line (4.70); centerBounds keep them there (narrow tighter than
+% broad).  widthInit seeds one narrow, one broad; the per-component
+% widthBounds are DISJOINT ([0.015 0.05] vs [0.05 0.45]) so the optimizer
+% physically cannot merge the two into a single width.
+pars.watfit.centerInit   = [4.70 4.70];
+pars.watfit.centerBounds = [4.64 4.76;              % narrow core
+                            4.58 4.82];             % broad pedestal
+pars.watfit.widthInit    = [0.025 0.10];            % [narrow broad] ppm
+pars.watfit.baselineOpt  = pars.fit.baselineOpt;
+pars.watfit.baselineOpt.enable      = false;        % flat baseline; 2 comps carry all area
+pars.watfit.baselineOpt.widthBounds = [0.015 0.050; % narrow core band
+                                       0.050 0.450];% broad pedestal band
+pars.watfit.lineShapeOpt.enable     = false;        % no kernel (broad comp is the pedestal)
 % Wider area integration window than the default 10x: Lorentzian 1/x^2
 % wings converge slowly, so a pad of ~100x captures >99.7% of the peak.
 % Only affects output.wat.fit.areaTotal (and downstream absolute quant),
@@ -160,15 +222,21 @@ pars.watfit.lineShapeOpt.areaPadFactor = 100;
 %   waterConc_M : whole blood is ~83% water by mass -> ~0.83 * 55.5 M ~= 46 M
 %   T1/T2       : blood water at high field (rough literature placeholders)
 % =====================================================================
-Blood = struct('name','Blood', 'T1_ms', 2000, 'T2_ms', 50, ...
+Blood = struct('name','Blood', 'T1_ms', 2500, 'T2_ms', 29.2, ...
                'waterConc_M', 0.8 * 55, 'flag_metSig',true);
 
-% Downfield-proton relaxation / proton counts. We don't think these values
-% matter much based on sequence parameters
-met_T1_ms = [300, 300, 300, 300];   % NADH2, NADH6, NADH4, Trp
-met_T2_ms = [ 10,  10,  10,  10];
-met_nProt = [    1,     1,     1,   1];
-peakNames = {'NADH2','NADH6','NADH4','Trp'};
+% Downfield-proton relaxation / proton counts.  Placeholders for now (same
+% for every peak); kept as explicit per-peak arrays because they will be
+% replaced with measured per-peak T1/T2 later.  Trp is now a single broad
+% component, quantified as one peak.
+%
+% ORDER MUST MATCH pars.peaks.name = {Broad9_4, NADH2, NADH6, Trp}, because
+% the quant loop indexes output.met.fit.areasConv positionally and areasConv
+% is returned in pars.peaks.name order (an assert below enforces this).
+met_T1_ms = [300, 300, 300, 300];   % Broad9_4, NADH2, NADH6, Trp
+met_T2_ms = [ 48.3,  40.1,  51.4,  18.0];   % Broad9_4, NADH2, NADH6, Trp (ms; T2 from relaxometry)
+met_nProt = [   1,    1,    1,    1];
+peakNames = {'Broad9_4','NADH2','NADH6','Trp'};
 nPeaks    = numel(peakNames);
 
 % =====================================================================
@@ -179,6 +247,13 @@ nPeaks    = numel(peakNames);
 % bru2mat_svsNAD rmpaths utils at exit; re-add for absoluteQuant_svs and
 % any other utils helpers used downstream.
 addpath(fullfile(fileparts(mfilename('fullpath')), 'utils'));
+
+% Guard: the quant loop below indexes output.met.fit.areasConv positionally,
+% so the relaxation/proton arrays + peakNames must be in the SAME order as the
+% fitted components (pars.peaks.name).  Fail loudly if they ever drift apart.
+assert(isequal(output.met.fit.names(:).', peakNames), ...
+    ['peakNames/met_T1_ms/met_T2_ms order must match the fitted components ' ...
+     '(output.met.fit.names = {%s})'], strjoin(output.met.fit.names, ', '));
 
 % =====================================================================
 % Voxel + absolute quant (single-compartment water reference)
@@ -216,6 +291,20 @@ end
 outPath = fullfile(FinalOutDir, sprintf('%s_blood_1H_abs.mat', scanID));
 save(outPath, 'output','parsOut','hdr','absQ','voxel','pars');
 fprintf('Saved -> %s\n', outPath);
+
+% Write the same metabolite concentrations to a TSV alongside the .mat file.
+tsvPath = fullfile(FinalOutDir, sprintf('%s_blood_1H_abs.tsv', scanID));
+fid = fopen(tsvPath, 'w');
+if ~isequal(fid,-1)
+    fprintf(fid, 'metabolite\tconc_uM\n');
+    for k = 1:nPeaks
+        fprintf(fid, '%s\t%.4g\n', peakNames{k}, absQ.metabolites(k).conc_mM * 1e3);
+    end
+    fclose(fid);
+    fprintf('Saved -> %s\n', tsvPath);
+else
+    fprintf('Could not save TSV');
+end
 
 % remove path
 rmpath(fullfile(fileparts(mfilename('fullpath')), 'utils'));

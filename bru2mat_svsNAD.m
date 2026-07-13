@@ -96,9 +96,10 @@ else
     nave     = nwsParams.acqus.NS;              % NWS averages (sum-of-NS in fid)
     seqname  = nwsParams.acqus.PULPROG;
     TR_ms    = nwsParams.acqus.D(2) * 1e3;
-    TE_ms    = 0; %NaN;                             % no TE field in 1D acqus
+    TE_ms    = 2 * nwsParams.acqus.D(17) * 1e3 + 2 * nwsParams.acqus.P(17) / 1e3 + nwsParams.acqus.P(13) / 1e3;                             % no TE field in 1D acqus
     rcv_gain = nwsParams.acqus.RG;
     center_freq_Hz = nwsParams.acqus.O1;
+    center_freq = center_freq_Hz/f0;
 
     try
         scandate = datetime(nwsParams.acqus.DATE, 'ConvertFrom','posixtime');
@@ -129,6 +130,7 @@ else
     output.wat.ppm      = ppm;
     output.wat.hz       = hz;
     output.wat.center_freq_Hz = center_freq_Hz;
+    output.wat.center_freq = center_freq; % ppm
     output.wat.seqname  = seqname;
     output.wat.TR_ms    = TR_ms;
     output.wat.TE_ms    = TE_ms;
@@ -158,7 +160,7 @@ npts     = size(ws,1);
 nave     = wsParams.acqus.NS;
 seqname  = wsParams.acqus.PULPROG;
 TR_ms    = wsParams.acqus.D(2) * 1e3;
-TE_ms    = 0; %NaN;
+TE_ms    = 2 * wsParams.acqus.D(17) * 1e3 + 2 * wsParams.acqus.P(17) / 1e3 + wsParams.acqus.P(13) / 1e3;  % no TE field in 1D acqus
 rcv_gain = wsParams.acqus.RG;
 center_freq_Hz = wsParams.acqus.O1;
 
@@ -187,8 +189,8 @@ t   = (0:vectorSize-1)/bw;
 hz  = (-1/2:1/vectorSize:1/2-1/vectorSize)*bw;
 ppm = (center_freq_Hz + hz)/f0;
 center_freq = center_freq_Hz/f0;
-disp(['center freq = ' num2str(center_freq) ' ppm'])
-% 
+% disp(['center freq = ' num2str(center_freq) ' ppm'])
+
 % % Siemens-style WIP excitation fields don't exist on Bruker; leave as defaults
 % exc_freq = center_freq;
 % exc_bw   = NaN;
@@ -200,6 +202,7 @@ if ~isfield(pars.block_align,'ppmRange'), pars.block_align.ppmRange = [8.5 10]; 
 output.met.ppm      = ppm;
 output.met.hz       = hz;
 output.met.center_freq_Hz = center_freq_Hz;
+output.met.center_freq = center_freq; % ppm
 output.met.seqname  = seqname;
 output.met.TR_ms    = TR_ms;
 output.met.TE_ms    = TE_ms;
@@ -211,7 +214,32 @@ if isempty(nws)
     pars.eccopt = -1;
     [ws, ~, ~] = eddyCurrentCorrection(ws, ws, pars.eccopt, nch);
 else
+    % Klose ECC (eccopt==0) divides out the entire reference phase including
+    % the linear ramp 2*pi*f_water*t, so water is forced to 0 Hz on output.
+    % Measure water's pre-ECC frequency from nws and restore it afterward so
+    % the ppm axis (built from center_freq_Hz) keeps its meaning.
+    if pars.eccopt == 0
+        % Water resonates at 4.7 ppm; its offset from the transmitter is fixed
+        % by ppm = (center_freq_Hz + hz)/f0, so f_water_Hz = 4.7*f0 - center_freq_Hz.
+        watPPM = 4.7;
+        f_water_Hz = watPPM*f0 - center_freq_Hz;
+        fprintf('  Klose ECC: water expected at %.2f Hz (%.2f ppm); restoring after correction\n', ...
+            f_water_Hz, watPPM);
+    end
     [ws, nws, ~] = eddyCurrentCorrection(nws, ws, pars.eccopt, nch);
+    if pars.eccopt == 0
+        % shiftSpectrumFrequency multiplies FID by exp(-1i*hzshift*2*pi*t),
+        % which shifts the spectrum by -hzshift Hz. To move water from 0 Hz
+        % back to +f_water_Hz, pass hzshift = -f_water_Hz.
+        ws_spec  = fftshift(fft(ws,  [], 1), 1);
+        nws_spec = fftshift(fft(nws, [], 1), 1);
+        ws_spec  = shiftSpectrumFrequency(ws_spec,  -f_water_Hz, t);
+        nws_spec = shiftSpectrumFrequency(nws_spec, -f_water_Hz, t);
+        ws  = ifft(ifftshift(ws_spec,  1), [], 1);
+        nws = ifft(ifftshift(nws_spec, 1), [], 1);
+        % output.met.ecc_f_water_Hz_restored = f_water_Hz;
+        % output.wat.ecc_f_water_Hz_restored = f_water_Hz;
+    end
 end
 
 disp('filtering')
@@ -350,7 +378,7 @@ if isfield(pars,'base') && strcmpi(pars.base,'full')
 end
 
 if pars.pltSpec
-    figure('Name','1H processed spectrum'), plot(ppm,real(ws)), title(fname), set(gca,'xdir','reverse')
+    figure('Name','1H processed spectrum'), plot(output.met.ppm,real(ws)), title(fname), set(gca,'xdir','reverse')
 end
 
 
@@ -365,6 +393,8 @@ output.wat.spec = nws;
 %           datfiles/rawfiles convention.)
 % =====================================================================
 if pars.dofit
+    ppm = output.met.ppm;
+
     if strcmpi(pars.dofit,'lcmodel')
 
         % creates .RAW files for LCModel fitting
@@ -405,6 +435,24 @@ if pars.dofit
                                 7.24 7.30; 7.48 7.54; 7.90 7.96; 8.01 8.07; ...
                                 8.13 8.19; 8.24 8.30; 8.36 8.42; 8.47 8.53];
             disp('Using default de Graaf peak table (12 peaks)')
+        end
+
+        % Optional data-driven re-seeding of peak center ranges (gated; used by
+        % the blood 1H pipeline).  Tightens pars.peaks.range around peaks
+        % detected in the processed spectrum so per-dataset frequency drift
+        % can't strand a component in a valley (which the >=0 amplitude solve
+        % then nulls).  Off by default => brain/calf pipelines unaffected.
+        if isfield(pars.peaks,'autoSeed') && isstruct(pars.peaks.autoSeed) && ...
+                isfield(pars.peaks.autoSeed,'enable') && pars.peaks.autoSeed.enable
+            rng0 = pars.peaks.range;
+            pars.peaks.range = autoSeedPeakRanges(real(ws), ppm, pars.peaks, pars.peaks.autoSeed);
+            for kk = 1:numel(pars.peaks.name)
+                if ~isequal(rng0(kk,:), pars.peaks.range(kk,:))
+                    fprintf('autoSeed: %-8s range %.3f-%.3f -> %.3f-%.3f ppm\n', ...
+                        pars.peaks.name{kk}, rng0(kk,1), rng0(kk,2), ...
+                        pars.peaks.range(kk,1), pars.peaks.range(kk,2));
+                end
+            end
         end
 
         % defaults
@@ -914,7 +962,18 @@ if pars.dofit
                         width0_w = w0 * logspace(-log10(4), log10(4), nWatComp);
                     end
                 end
-                if nWatComp == 1
+                % center0_w: default splits multi-component seeds by +/-0.05
+                % ppm (one peak per offset).  For a co-located narrow+broad
+                % water model (both components ON the water line, separated
+                % only by linewidth) override with a vector via
+                % pars.watfit.centerInit so the optimizer does NOT seed two
+                % distinct peaks.
+                if isfield(watfit,'centerInit') && ~isempty(watfit.centerInit)
+                    center0_w = watfit.centerInit(:).';
+                    assert(numel(center0_w) == nWatComp, ...
+                        'pars.watfit.centerInit must be length nComp=%d', nWatComp);
+                    amp0_w    = ones(1, nWatComp);
+                elseif nWatComp == 1
                     amp0_w    = 1;
                     center0_w = 4.72;
                 else
@@ -926,7 +985,16 @@ if pars.dofit
                 watBaseOpt = watfit.baselineOpt;
                 watBaseOpt.TolFun = 1e-8;
                 watBaseOpt.TolX   = 1e-8;
-                watBaseOpt.centerBounds = wat_peaks_range;
+                % centerBounds: default is the full ppm_range for every
+                % component (loose -- lets components wander into separate
+                % peaks).  For a co-located narrow+broad model, supply tight
+                % per-component bounds [nComp x 2] via pars.watfit.centerBounds
+                % so both stay pinned on the water line.
+                if isfield(watfit,'centerBounds') && ~isempty(watfit.centerBounds)
+                    watBaseOpt.centerBounds = watfit.centerBounds;
+                else
+                    watBaseOpt.centerBounds = wat_peaks_range;
+                end
                 watBaseOpt.knotSpacing = max(watBaseOpt.knotSpacing, diff(watfit.ppm_range));
                 localInds_w = xw > min(wat_peaks_range(:)) & xw < max(wat_peaks_range(:));
                 if any(localInds_w)
@@ -935,7 +1003,53 @@ if pars.dofit
                     watBaseOpt.amplUB = max(abs(real(yw)));
                 end
 
-                if isfield(watfit,'lineShapeOpt')
+                % Optional two-stage phase warm-start: when the lineshape
+                % kernel is enabled, the kernel-side Jacobian columns can
+                % keep the trust-region step in a basin where the phase
+                % parameter never moves (kernel takes a bite of the
+                % residual, residual changes shape, phase gradient drops
+                % below the step-acceptance threshold).  Mirrors the
+                % brain/calf coarse->fine pattern: stage 1 fits with the
+                % kernel disabled to converge phase cleanly; phase is then
+                % applied to the complex water spectrum slice, and stage 2
+                % refits the pre-phased data with the kernel enabled and a
+                % tight ph_range so phase has nowhere left to drift.
+                % Opt-in only; complex-peak modes (3/4/5) only.
+                doTwoStage = isfield(watfit,'twoStagePhase') && watfit.twoStagePhase ...
+                            && isfield(watfit,'lineShapeOpt') && isfield(watfit.lineShapeOpt,'enable') ...
+                            && watfit.lineShapeOpt.enable ...
+                            && any(watfit.mode == [3 4 5]);
+
+                if doTwoStage
+                    % Stage 1: kernel disabled, phase free over watfit.ph_range.
+                    % Loose tolerances (1e-3) match the metabolite coarse
+                    % stage in nadCoarsePhase -- stage 1 just needs to land
+                    % in the right phase basin, not converge tightly.
+                    lsOff = watfit.lineShapeOpt;  lsOff.enable = false;
+                    watBaseOpt_s1 = watBaseOpt;
+                    watBaseOpt_s1.TolFun = 1e-3;
+                    watBaseOpt_s1.TolX   = 1e-3;
+                    stage1 = curvefitAuto_varproBaseline(xw, yw, watfit.mode, amp0_w, center0_w, width0_w, watfit.ph_range, minw, watBaseOpt_s1, lsOff);
+                    % phase indices in output.pars: per peak, [amp, pos, width, ph]
+                    nWat = nWatComp;
+                    phIdx = 4*(1:nWat);    % the 'ph' column for each peak
+                    ph_stage1 = stage1.pars(phIdx);
+                    fprintf('  watfit two-stage: stage-1 ph = %s deg (warm-starting stage 2)\n', ...
+                        mat2str(ph_stage1(:).', 4));
+
+                    % Stage 2: kernel enabled, full watfit.ph_range, but
+                    % phase initialized at the stage-1 converged value via
+                    % baselineOpt.phaseInit so the optimizer starts in the
+                    % right basin.  Data is NOT modified -- the original yw
+                    % (and the original complex spectrum) are unchanged, so
+                    % the plot, output.wat.fit.spec, and any downstream
+                    % consumer see the raw water spectrum.
+                    watBaseOpt_s2 = watBaseOpt;
+                    watBaseOpt_s2.phaseInit = ph_stage1;
+                    watFitOutput = curvefitAuto_varproBaseline(xw, yw, watfit.mode, amp0_w, center0_w, width0_w, watfit.ph_range, minw, watBaseOpt_s2, watfit.lineShapeOpt);
+
+                    watFitOutput.phaseCorr.ph_stage1 = ph_stage1;
+                elseif isfield(watfit,'lineShapeOpt')
                     watFitOutput = curvefitAuto_varproBaseline(xw, yw, watfit.mode, amp0_w, center0_w, width0_w, watfit.ph_range, minw, watBaseOpt, watfit.lineShapeOpt);
                 else
                     watFitOutput = curvefitAuto_varproBaseline(xw, yw, watfit.mode, amp0_w, center0_w, width0_w, watfit.ph_range, minw, watBaseOpt);
@@ -981,6 +1095,9 @@ if pars.dofit
                 output.wat.fit.ppm = xw;
                 output.wat.fit.lb = watFitOutput.lb;
                 output.wat.fit.ub = watFitOutput.ub;
+                if isfield(watFitOutput,'phaseCorr')
+                    output.wat.fit.phaseCorr = watFitOutput.phaseCorr;
+                end
                 fprintf('  Water area (fit, ext-axis): %.4g  (in-window: %.4g, base-only: %.4g)\n', ...
                     output.wat.fit.areaTotal, output.wat.fit.areaTotalWin, output.wat.fit.areaBase)
 

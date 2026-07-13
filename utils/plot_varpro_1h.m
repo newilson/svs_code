@@ -57,7 +57,11 @@ yl = ylim;
 % ---- Middle: per-component contributions (comp is already amp-scaled)
 ax2 = subplot(3,1,2);
 hold on;
-plot(x, y, 'Color',[0.6 0.6 0.6]);
+% Subtract spline baseline from data so per-component overlays sit on a
+% flat zero baseline -- makes it easy to judge each peak's contribution
+% without the baseline trend distorting the visual comparison.
+yMinusBase = y - real(baseline);
+plot(x, yMinusBase, 'Color',[0.6 0.6 0.6]);
 nMet = size(comp,2);
 cmap = lines(nMet);
 labels = cell(nMet,1);
@@ -97,7 +101,7 @@ set(ax1,'Position',[pos1(1) pos1(2) axWidth pos1(4)]);
 set(ax2,'Position',[pos2(1) pos2(2) axWidth pos2(4)]);
 set(ax3,'Position',[pos3(1) pos3(2) axWidth pos3(4)]);
 
-hLeg = legend(ax2, [{'data'}, labels(:).'], 'FontSize', 8, 'Interpreter','none');
+hLeg = legend(ax2, [{'data-baseline'}, labels(:).'], 'FontSize', 8, 'Interpreter','none');
 set(hLeg, 'Location', 'none');
 legX = pos1(1) + axWidth + 0.01;
 legY = pos2(2);

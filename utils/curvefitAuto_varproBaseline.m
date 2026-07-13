@@ -291,6 +291,21 @@ if isfield(baselineOpt,'phaseBounds') && ~isempty(baselineOpt.phaseBounds) ...
     pars(idx) = min(max(pars(idx), lb(idx)), ub(idx));
 end
 
+% Optional phase initialization (deg), overriding the default
+% mean(ph_range).  Scalar -> applied to all peaks; vector of length n ->
+% per-peak.  Bounds (lb/ub) are unchanged so phase remains free to move.
+% Used by the two-stage water fit in bru2mat_svsNAD to warm-start stage 2
+% at the converged stage-1 phase, so the optimizer starts in the right
+% basin without having to rotate the input data.
+if isfield(baselineOpt,'phaseInit') && ~isempty(baselineOpt.phaseInit) ...
+        && (mode==3 || mode==4 || mode==5)
+    pi0 = baselineOpt.phaseInit(:).';
+    if isscalar(pi0), pi0 = pi0 * ones(1, n); end
+    assert(numel(pi0) == n, 'baselineOpt.phaseInit must be scalar or length n=%d', n);
+    idx = 2*n + (1:n);
+    pars(idx) = min(max(pi0, lb(idx)), ub(idx));
+end
+
 % Append optional shared lineshape distortion parameters
 nPeakPars = length(pars);
 [lineShapePars0, lineShapeLb, lineShapeUb, lineShapeParnames] = initLineShapePars(lineShapeOpt);
@@ -319,11 +334,6 @@ tolFun = relTolFun * ssrData;
 tolX   = relTolX;
 options = optimset(oldoptions, 'TolFun', tolFun,'TolX', tolX, ...
     'MaxFunEval',20000*n,'MaxIter',12000,'Display',getDisplayFlag(baselineOpt.verbose));
-% options = optimoptions('lsqnonlin', ...
-%     'Algorithm','trust-region-reflective', ...
-%     'FunctionTolerance', tolFun, 'StepTolerance', tolX, ...
-%     'MaxFunctionEvaluations',20000*n, 'MaxIterations',12000, ...
-%     'Display',getDisplayFlag(baselineOpt.verbose));
 
 if (mode == 1) % Gaussian
 
@@ -783,7 +793,14 @@ function yfit = compositeV_complex_unit(ip, x)
                 N0 = 1;
             end
         end
-        yfit = real((Vc / N0) * exp(-1i*ph));
+        % conj(Vc): fadf returns w(z) = exp(-z^2) erfc(-iz), whose
+        % imaginary part is POSITIVE for u = (x-p)/(sigma sqrt(2)) > 0.
+        % The Lorentzian sigma=0 branch above (and compositel_complex_unit)
+        % use the standard NMR dispersion convention where Im is NEGATIVE
+        % for x > p.  Without the conjugation, the phase parameter sign
+        % flipped discontinuously at sigma=0 and was inverted relative to
+        % mode 3 for the same physical phase rotation.
+        yfit = real((conj(Vc) / N0) * exp(-1i*ph));
     end
 end
 
@@ -940,6 +957,31 @@ function [pars0, lb0, ub0, names] = initLineShapePars(opt)
         lb0 = zeros(1, nls);
         ub0 = opt.maxSide * ones(1, nls);
         names = {'lineShape'};
+    end
+
+    % Optional warm-start of the side taps.  Starting the kernel at the
+    % all-zero (lb) corner leaves the trust-region optimizer with a nearly
+    % flat gradient there, so the kernel never engages -- the fit collapses
+    % to the bare (un-convolved) peak.  Seeding the taps with a non-zero
+    % pedestal profile lets the optimizer start with an engaged kernel and
+    % refine it (analogous to baselineOpt.phaseInit for the phase term).
+    % opt.init may be a scalar (same value for every tap), a vector of
+    % length nls, or a function handle @(k) evaluated at tap offsets
+    % k = 1..nSide (broadcast across both sides when asymmetric).  Values
+    % are clamped to [lb, ub].  Default (absent/empty) preserves the
+    % original all-zero start, so other fits are unaffected.
+    if isfield(opt,'init') && ~isempty(opt.init)
+        if isa(opt.init,'function_handle')
+            p = opt.init((1:opt.nSide));
+            if opt.asymmetric, p = [p(:).' p(:).']; end
+        elseif isscalar(opt.init)
+            p = opt.init * ones(1, nls);
+        else
+            p = opt.init(:).';
+            if numel(p) == opt.nSide && opt.asymmetric, p = [p p]; end
+            assert(numel(p) == nls, 'lineShapeOpt.init must be scalar, length nSide, or length %d', nls);
+        end
+        pars0 = min(max(p, lb0), ub0);
     end
 end
 

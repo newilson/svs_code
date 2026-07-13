@@ -349,9 +349,11 @@ if pars.dofit
         end
 
         % build basis FIDs at data length / dwell
-        [basisFIDs, basisInfo] = make31P_basisFIDs(t(:), f0, ...
-            'metabSubset', pars.fit.metabs, ...
-            'adcshift',    adcshift);
+        basisArgs = {'metabSubset', pars.fit.metabs, 'adcshift', adcshift};
+        if isfield(pars.fit,'refExtPpm') && ~isempty(pars.fit.refExtPpm)
+            basisArgs = [basisArgs, {'refExtPpm', pars.fit.refExtPpm}];
+        end
+        [basisFIDs, basisInfo] = make31P_basisFIDs(t(:), f0, basisArgs{:});
 
         % fit input: prefer first-spectrum column for now
         x = ppm(:);

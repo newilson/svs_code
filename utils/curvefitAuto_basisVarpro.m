@@ -200,7 +200,7 @@ if parametricOpt.enable && ~isempty(parametricOpt.peakPpm)
         peakHz = ppmToHzByAxis(parametricOpt.peakPpm(kp), x, freqAxisFull);
         w = parametricOpt.widthHz(kp);
         ph = parametricOpt.phaseDeg(kp) * pi/180;
-        paramFIDs(:,kp) = exp(1i*2*pi*peakHz*t) .* exp(-pi*w*t) .* exp(1i*ph);
+        paramFIDs(:,kp) = exp(1i*2*pi*peakHz*t) .* exp(-pi*w*t) .* exp(-1i*ph);
         if kp <= length(parametricOpt.names) && ~isempty(parametricOpt.names{kp})
             nameParam{kp} = parametricOpt.names{kp};
         else
@@ -544,7 +544,7 @@ output.basisInfo      = basisInfo;
         mod_shift = exp(1i * 2*pi * (tt * shiftRow));
         mod_lbL   = exp(-pi * (tt * lbLrow));
         mod_lbG   = exp(-((pi * (tt * lbGrow)).^2) / (4*log(2)));
-        mod_phi0  = exp(1i * (phi0row * pi/180));
+        mod_phi0  = exp(-1i * (phi0row * pi/180));
 
         fidMod = allFIDs .* mod_shift .* mod_lbL .* mod_lbG .* mod_phi0;
 

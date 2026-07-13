@@ -27,6 +27,15 @@ y    = real(y(:));
 comp = out.comp;
 ampl = out.areas(:);
 
+% Subtract spline baseline from data so each per-peak overlay sits on a
+% flat zero baseline -- makes it easy to judge each component's contribution
+% without the baseline trend distorting the visual comparison.
+if isfield(out,'baseline') && ~isempty(out.baseline)
+    yPlot = y - real(out.baseline(:));
+else
+    yPlot = y;
+end
+
 if nargin < 4 || isempty(names)
     names = arrayfun(@(k) sprintf('p%d',k), 1:numel(ampl), 'UniformOutput', false);
 end
@@ -37,7 +46,7 @@ nrows = ceil(nMet/ncols);
 
 fig = figure('Position',[10 10 320*ncols 260*nrows], 'Name','1H component spectra gallery');
 
-ymax = max(abs(y));
+ymax = max(abs(yPlot));
 if ymax == 0, ymax = 1; end
 yLim = [-0.4*ymax, 1.1*ymax];
 
@@ -48,8 +57,8 @@ for k = 1:nMet
 
     ck = real(comp(:,k));
 
-    plot(x, y,  'Color',[0.6 0.6 0.6], 'LineWidth', 1.0); hold on;
-    plot(x, ck, 'r', 'LineWidth', 1.4);
+    plot(x, yPlot, 'Color',[0.6 0.6 0.6], 'LineWidth', 1.0); hold on;
+    plot(x, ck,    'r', 'LineWidth', 1.4);
 
     set(ax, 'XDir','reverse');
     ylim(yLim);
@@ -57,7 +66,7 @@ for k = 1:nMet
     title(sprintf('%s  (ampl=%.3g)', names{k}, ampl(k)), 'Interpreter','none');
 
     if k == 1
-        legend({'data','ampl \times peak'}, 'Location','northwest', 'FontSize', 8);
+        legend({'data-baseline','ampl \times peak'}, 'Location','northwest', 'FontSize', 8);
     end
     if k > (nrows-1)*ncols, xlabel('ppm'); end
 end

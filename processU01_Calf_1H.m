@@ -12,9 +12,7 @@ function processU01_Calf_1H(SessionDir, FinalOutDir, plt)
 % Unlike the brain pipeline, calf is treated as a SINGLE muscle compartment:
 % there is no anatomic segmentation, so absoluteQuant_svs is called with one
 % tissue (fraction = 1, flag_metSig = true), which recovers the un-segmented
-% Gasparovic case (f_CSF = 0).  Two fit groups are used (coarseMode
-% 'perRegion'): the NAD+ cluster (H2/H6/H4) and a downfield group (NR ~9.7 ppm,
-% a small Trp singlet ~10.1 ppm, and a larger unidentified peak ~10.3 ppm).
+% Gasparovic case (f_CSF = 0).  
 %
 % Output: <FinalOutDir>\<scanID>_calf_1H_abs.mat
 %   (output, parsOut, hdr, absQ, voxel, pars)
@@ -130,7 +128,6 @@ pars.watfit.ppm_range = [4 5.5];
 
 % =====================================================================
 % Single muscle compartment: water content + relaxation.
-% PLACEHOLDER values for skeletal muscle at 7T. EDIT BEFORE PUBLICATION.
 %   waterConc_M : ~0.77 g water/g tissue * 55.5 M ~= 42.7 mol/L
 %   T1/T2       : muscle water at 7T (rough literature placeholders)
 % =====================================================================

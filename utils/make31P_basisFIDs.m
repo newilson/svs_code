@@ -55,15 +55,23 @@ p = inputParser;
 p.addParameter('metabSubset', {});
 p.addParameter('adcshift', 0);
 p.addParameter('lwHzDefault', 0);
+p.addParameter('refExtPpm', 8.0);   % chemical shift of external reference singlet 'RefExt'
 p.parse(varargin{:});
 metabSubset = p.Results.metabSubset;
 adcshift    = p.Results.adcshift;
 lwHzDefault = p.Results.lwHzDefault;
+refExtPpm   = p.Results.refExtPpm;
 
 t = t(:);
 N = length(t);
 
 mets = getBasisParamStruct_31P7T_brain(lwHzDefault);
+
+% External-reference singlet: let caller place its chemical shift (default 8 ppm).
+irExt = strcmpi({mets.name}, 'RefExt');
+if any(irExt) && ~isempty(refExtPpm)
+    mets(irExt).ppm = refExtPpm;
+end
 
 % filter
 if ~isempty(metabSubset)
@@ -178,6 +186,18 @@ mets(end+1) = newPP2('UDPGlcNAc', [-8.265, -9.963], 20.5,  lwDefault, 2);
 %      can absorb the underlying broad envelope in the aATP/NAD/UDP region.
 mets(end+1) = newSinglet('Broad8_5',  -8.5,  max(lwDefault,300), 1);
 mets(end+1) = newSinglet('Broad10_5', -10.5, max(lwDefault,300), 1);
+
+% ---- External reference singlet (absolute-quant phantom). Only enters the
+%      fit when 'RefExt' is in metabSubset. Default ppm here is a placeholder;
+%      the caller sets it via the 'refExtPpm' option (~8 ppm for the current
+%      D2O phantom). n = 1 equivalent 31P (assumed; edit if compound differs).
+mets(end+1) = newSinglet('RefExt', 8.0, lwDefault, 1);
+
+% ---- Broad background under the positive-side (PME / reference) region.
+%      Only used alongside RefExt: it absorbs the broad ~5-12 ppm envelope so
+%      the narrow RefExt peak (and PE) are not forced to model it. Broad-*
+%      prefix makes the caller treat it with broad linewidth/shift bounds.
+mets(end+1) = newSinglet('BroadRefBG', 8.5, max(lwDefault,400), 1);
 
 end
 
