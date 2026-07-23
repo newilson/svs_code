@@ -1,33 +1,43 @@
-function processU01_Brain_1H(SessionDir, FinalOutDir, segTsv, plt)
+function processU01_Brain_1H(SessionDir, FinalOutDir, segTsv, plt, outStem)
 % PROCESSU01_BRAIN_1H  Absolute NAD+ quantification for one U01 brain session.
 %
 %   processU01_Brain_1H(SessionDir, FinalOutDir, segTsv)
+%   processU01_Brain_1H(SessionDir, FinalOutDir, segTsv, plt, outStem)
 %
-% Reads the water-suppressed (*_NAD_*) and water-reference (*_Water_*)
-% .dat files from <SessionDir>\datfiles\, parses CSF/GM/WM voxel counts
-% from the brainseg.sh TSV, runs the processing/fitting in dat2mat_svsNAD.m, then converts each
-% peak to absolute [mM] via the 3-compartment Gasparovic model in
-% absoluteQuant_svs.m.
+% Reads the water-suppressed and water-reference .dat files from
+% <SessionDir>\datfiles\ (or <SessionDir> itself), parses CSF/GM/WM voxel
+% counts from the brainseg.sh TSV, runs the processing/fitting in
+% dat2mat_svsNAD.m, then converts each peak to absolute [mM] via the
+% 3-compartment Gasparovic model in absoluteQuant_svs.m.
 %
 % Output: <FinalOutDir>\<scanID>_brain_1H_abs.mat
 %   (output, parsOut, hdr, absQ, voxel, segFracs, pars)
 %
-% When multiple *_NAD_* or *_Water_* .dat files are present, the one with
-% the highest MID number is used.
+% When several candidate .dat files are present, the highest MID number is
+% used.  See pick_latest_pair for the recognised naming conventions.
+%
+% Design rationale, parameter sweeps, rejected alternatives and open issues:
+% see processU01_Brain_1H_NOTES.md (same folder).  Section numbers referenced
+% below as "NOTES sN" refer to that file.
 
 arguments
     SessionDir  (1,:) char
     FinalOutDir (1,:) char
     segTsv      (1,:) char
     plt         (1,1) logical = false
+    outStem     (1,:) char = ''    % overrides <scanID> in the output filename
 end
 
 assert(isfolder(SessionDir), 'SessionDir not found: %s', SessionDir);
 assert(isfile(segTsv),       'segTsv not found: %s',     segTsv);
 if ~isfolder(FinalOutDir), mkdir(FinalOutDir); end
 
+% Sessions are normally laid out as <SessionDir>\datfiles\*.dat, but some
+% exported studies keep the .dat files directly in the session folder.
 datDir = fullfile(SessionDir, 'datfiles');
-assert(isfolder(datDir), 'datfiles\\ subfolder not found in %s', SessionDir);
+if ~isfolder(datDir)
+    datDir = SessionDir;
+end
 
 [wsDat, watDat] = pick_latest_pair(datDir);
 fprintf('WS  : %s\n', wsDat);
@@ -59,41 +69,46 @@ pars.WatSupPost.opts.hsvd.nsin   = 25;
 
 pars.dofit         = 'varpro';
 pars.fit.mode      = 5;                 % Voigt
-% pars.fit.ppm_range = [8.7 10.0];
-pars.fit.ppm_range = [8.7 10.3];
-% NOTE: wide phase range is intentional.  Tightening ph_range to [-15 15]
-% (and/or making lineShapeOpt symmetric / lowering its maxSide; see below)
-% makes the per-component figures LOOK cleaner -- pure-absorptive peaks,
-% baseline no longer floats above the data -- but tested (May 2026) it makes
-% NADH2:NADH6:NADH4 LESS self-consistent across averages/sessions.  The wide
-% phase + asymmetric lineShape kernel are absorbing real systematic
-% distortion (eddy currents, B0 asymmetry, residual phase drift); take that
-% freedom away and the distortion is forced into the peak amplitudes, where
-% it pulls each NAD proton unequally.  Do not narrow without re-verifying
-% NAD self-consistency.  See feedback-nad-1h-phase-and-lineshape-stay-wide.
+% Inert while pars.fit.regions is defined (only seeds focusRange, and focus
+% weighting needs focusWeight > 1).  Kept consistent with the region edges.
+pars.fit.ppm_range = [8.7 10.45];
+% Wide by design.  Do NOT narrow before the coarse phase step is fixed -- the
+% width is currently absorbing a first-order phase error, not real distortion,
+% and the May 2026 test that justified it was confounded.  NOTES s4.
 pars.fit.ph_range  = [-60 60];
 pars.peaks.name    = {'NADH2','NADH6','NADH4','Trp'};
 pars.peaks.range   = [9.25 9.45; 9.05 9.25; 8.8 9.05; 10.05 10.15];
 
-% Two independent fit regions: the NAD+ cluster and a narrow Trp singlet at
-% ~10.1 ppm, each running its own coarse->phase->fine fit (coarseMode
-% 'perRegion').  Trp's narrow window lets the local spline baseline flex enough
-% to absorb the broad macromolecular hump under Trp without inflating Trp, while
-% the NAD window keeps a stiff baseline that does not nibble the broad NADH4
-% peak.  A single wide region cannot do both at once: a stiff baseline inflates
-% Trp ~2x, a flexible one eats NADH4, and an explicit broad component
-% (BroadMM, name-detected by dat2mat_svsNAD) is multimodal/fragile across
-% sessions (verified on S007/S076).
+% Two independent fit regions -- the NAD+ cluster and the narrow Trp singlet at
+% ~10.1 ppm -- each running its own coarse->phase->fine fit.  A single wide
+% region cannot serve both: a stiff baseline inflates Trp, a flexible one eats
+% NADH4.  Splitting also keeps low-SNR Trp out of the NAD phase ramp.  NOTES s1.
 pars.fit.coarseMode = 'perRegion';
-% pars.fit.regions(1).fitRange = [8.7 10.0];
-% pars.fit.regions(1).peaks    = {'NADH2','NADH6','NADH4'};
-% pars.fit.regions(1).name     = 'NAD';
-% pars.fit.regions(2).fitRange = [9.95 10.3];   % fairly narrow, around 10.1
-% pars.fit.regions(2).peaks    = {'Trp'};
-% pars.fit.regions(2).name     = 'Trp';
-pars.fit.regions(1).fitRange = [8.7 10.3];
-pars.fit.regions(1).peaks    = {'NADH2','NADH6','NADH4','Trp'};
-pars.fit.regions(1).name = 'NAD/Trp';
+% Region 1 lower edge 8.7, not 8.6: the extra 0.1 ppm turns sharply upward into
+% an unmodelled ~8.5 ppm ATP2/adenine peak and needs a baseline the spline
+% cannot follow, and that misfit lands on NADH4.  Cost: ~15% of NADH4's
+% Lorentzian mass falls outside the window.  NOTES s1.
+pars.fit.regions(1).fitRange = [8.7 10.0];
+pars.fit.regions(1).peaks    = {'NADH2','NADH6','NADH4'};
+pars.fit.regions(1).name     = 'NAD';
+% 3 intervals over 1.3 ppm -> 6 spline coefficients (ncoef = nIntervals + 3),
+% the median flexibility the measured baseline needs here.  NOTES s2.
+pars.fit.regions(1).baselineOpt.knotSpacing = 0.43;
+% 0.65 ppm window keeps window:width ~3.2:1 for the intrinsically broad Trp.
+pars.fit.regions(2).fitRange = [9.8 10.45];
+pars.fit.regions(2).peaks    = {'Trp'};
+pars.fit.regions(2).name     = 'Trp';
+% Sentinel -> max(2, round(0.65/2)) = 2 intervals = 5 spline coefficients (the
+% floor).  A 6-coef variant (knotSpacing 0.22) was tried and REJECTED: it wins
+% on residual but puts an interior minimum in the baseline in 12/12 subjects,
+% right under Trp -- peak/baseline degeneracy, not a better model.  Do NOT
+% re-select this on Trp-window residual or on SpecTickle agreement.  NOTES s2.
+pars.fit.regions(2).baselineOpt.knotSpacing = 2;
+% Single-region alternative, retired Jul 2026 (H4/H2 = 2.44 vs 1.083 expected;
+% Trp/H2 CV 45%).  Kept for A/B against the two-region config above.  NOTES s1.
+% pars.fit.regions(1).fitRange = [8.7 10.3];
+% pars.fit.regions(1).peaks    = {'NADH2','NADH6','NADH4','Trp'};
+% pars.fit.regions(1).name     = 'NAD/Trp';
 
 pars.fit.baselineOpt.enable      = true;
 pars.fit.baselineOpt.knotSpacing = 2;
@@ -101,15 +116,41 @@ pars.fit.baselineOpt.lambda      = 1;
 pars.fit.baselineOpt.lambdaAmpl  = 0;
 pars.fit.baselineOpt.TolFun      = 1e-6;
 
-% NOTE: asymmetric shared lineshape kernel is intentional -- see the wide
-% ph_range comment above.  Together they absorb real systematic line
-% distortion; constraining either degrades NAD self-consistency.
-pars.fit.lineShapeOpt.enable     = true;
+% HSVD-derived SOFT PRIORS on the fine fit (penalties, not constraints, so the
+% data can still overrule them).  A hard width cap was tried first and rejected:
+% a bound pins the width and dumps the discrepancy into the amplitude.
+%   lambdaPrior: baseline penalty ||w.*(B*beta - hsvdBaseline)||^2.  OFF -- it
+%     degrades every metric, because HSVD's lw_max truncates broad wings and so
+%     leaves genuine peak signal in its "baseline".  Hook kept for a better
+%     baseline estimate (untruncated HSVD, or a measured MM spectrum).
+%   lambdaWidth: Voigt total FWHM vs the HSVD linewidth.  Does nearly all the
+%     work and saturates -- anything in 0.05-2.0 is equivalent.
+% NOTES s3 for the sweep table.
+pars.fit.baselineOpt.lambdaPrior = 0.0;
+pars.fit.baselineOpt.lambdaWidth = 0.3;
+
+% Shared lineshape kernel DISABLED: it is collinear with the Voigt Gaussian
+% width and was winning, leaving widthG railed at its lower bound.  Settings
+% kept (disabled) for A/B tests.  NOTES s5.
+pars.fit.lineShapeOpt.enable     = false;
 pars.fit.lineShapeOpt.nSide      = 4;
 pars.fit.lineShapeOpt.asymmetric = true;
 pars.fit.lineShapeOpt.maxSide    = 0.50;
 
 pars.fit.hsvdClean.enable = false;
+
+% ---------------------------------------------------------------------
+% Coarse seeding / phase correction by HSVD (replaces the coarse VARPRO).
+% K/npts match SpecTickle's defaults; lw and phase acceptance windows follow
+% its 7T 1H brain peak table.  phaseTolDeg matters -- loosening it lets
+% inverted components seed a peak and wreck the phase ramp.  NOTES s6.
+% Vectors are in pars.peaks.name order and get subset per fit region.
+pars.fit.hsvdCoarse.enable      = true;
+pars.fit.hsvdCoarse.K           = 60;
+pars.fit.hsvdCoarse.npts        = 1024;
+pars.fit.hsvdCoarse.lwMinHz     = [ 10  10  10  10];   % NADH2 NADH6 NADH4 Trp
+pars.fit.hsvdCoarse.lwMaxHz     = [ 90  90  90 120];
+pars.fit.hsvdCoarse.phaseTolDeg = [100 100 100 100];
 
 pars.watfit.method    = 'fit';
 pars.watfit.nComp     = 1;
@@ -122,9 +163,12 @@ WM  = struct('name','WM', 'T1_ms',1130, 'T2_ms', 40, 'waterConc_M',38.5, 'flag_m
 GM  = struct('name','GM', 'T1_ms',1939, 'T2_ms', 40, 'waterConc_M',44,   'flag_metSig',true);
 CSF = struct('name','CSF','T1_ms',4400, 'T2_ms',300, 'waterConc_M',55,   'flag_metSig',false);
 
-% Trp: indole NH proton (1H) at 10.1 ppm; T1/T2 set to 100/10 ms.
-met_T1_ms = [205.6, 211.6, 237.3, 100];   % NADH2, NADH6, NADH4, Trp
-met_T2_ms = [ 33.6,  29.1,  42.3,  10];
+% Trp: indole NH proton (1H) at 10.1 ppm.  Trp T1/T2 (75/19 ms) are NOT
+% FINALISED -- placeholders matching SpecTickle's constants for comparability,
+% pending a measured Trp T1/T2.  Revisit before reporting absolute Trp.
+% NAD+ values are literature and unchanged.  NOTES s7.
+met_T1_ms = [205.6, 211.6, 237.3, 75];   % NADH2, NADH6, NADH4, Trp
+met_T2_ms = [ 33.6,  29.1,  42.3, 19];
 met_nProt = [    1,     1,     1,   1];
 peakNames = {'NADH2','NADH6','NADH4','Trp'};
 nPeaks    = numel(peakNames);
@@ -170,12 +214,9 @@ voxel.tissues(3).fraction = segFracs(3);
 
 data = struct();
 data.water.area = output.wat.fit.areaTotal;
-% Use kernel-aware areas: `areas` is base-Voigt (ampl .* width) only and
-% under-counts whenever pars.fit.lineShapeOpt is enabled; `areasConv`
-% integrates the convolved component (see dat2mat_svsNAD / curvefitAuto_
-% varproBaseline).  When the water fit has no kernel and the metabolite
-% fit does, swapping `areas`->`areasConv` raises the reported metabolite
-% concentrations by the kernel factor (~10-40% with the current settings).
+% Use areasConv, not areas: it integrates the convolved component and is
+% phase-invariant (area of the ZERO-PHASE model peak), so quantitation does not
+% depend on the fitted phase.  `areas` is base-Voigt (ampl .* width) only.
 for k = 1:nPeaks
     data.metabolites(k).name     = peakNames{k};
     data.metabolites(k).area     = output.met.fit.areasConv(k);
@@ -195,7 +236,11 @@ end
 % =====================================================================
 % Save
 % =====================================================================
+% Output stem defaults to the session folder name; pass outStem to override
+% it (used when re-running a session in place and the existing
+% <scanID>_brain_1H_abs.mat must be preserved as a baseline).
 [~, scanID] = fileparts(SessionDir);
+if ~isempty(outStem), scanID = outStem; end
 outPath = fullfile(FinalOutDir, sprintf('%s_brain_1H_abs.mat', scanID));
 save(outPath, 'output','parsOut','hdr','absQ','voxel','segFracs','pars');
 fprintf('Saved -> %s\n', outPath);
@@ -207,10 +252,23 @@ end
 
 % =====================================================================
 function [wsDat, watDat] = pick_latest_pair(datDir)
-% Highest-MID *_NAD_* (water-suppressed) and *_Water_* (water-ref) .dat
-% among files containing 'svssel'.
+% Highest-MID water-suppressed and water-reference .dat among files
+% containing 'svssel'.
+%
+% Two naming conventions are recognised, because different studies label the
+% same two scans differently:
+%
+%   water-suppressed  : '_NAD_'    or  'OSrem'
+%   water reference   : '_Water_'  or  'waterref'
+%
+% 'waterref' deliberately does not match the '_Water_' test (no trailing
+% underscore), so the conventions cannot cross-match; the water-suppressed
+% test is applied first regardless.  NOTES s9.
 
 allF = dir(fullfile(datDir, '*svssel*.dat'));
+
+wsPat  = {'_NAD_',   'OSrem'   };   % water-suppressed (metabolite)
+watPat = {'_Water_', 'waterref'};   % water reference
 
 nNAD = 0; nWAT = 0;
 nadFiles = strings(0); watFiles = strings(0);
@@ -222,19 +280,21 @@ for k = 1:numel(allF)
     if isempty(tok), continue; end          % require MID# to disambiguate
     midNum = str2double(tok{1});
 
-    if contains(fn, '_NAD_', 'IgnoreCase', true)
+    if any(contains(fn, wsPat, 'IgnoreCase', true))
         nNAD = nNAD + 1;
         nadFiles(nNAD) = string(fn); %#ok<AGROW>
         nadMid(nNAD)   = midNum;     %#ok<AGROW>
-    elseif contains(fn, '_Water_', 'IgnoreCase', true)
+    elseif any(contains(fn, watPat, 'IgnoreCase', true))
         nWAT = nWAT + 1;
         watFiles(nWAT) = string(fn); %#ok<AGROW>
         watMid(nWAT)   = midNum;     %#ok<AGROW>
     end
 end
 
-assert(nNAD > 0, 'No water-suppressed (*_NAD_*) .dat in %s',   datDir);
-assert(nWAT > 0, 'No water-reference (*_Water_*) .dat in %s',  datDir);
+assert(nNAD > 0, 'No water-suppressed (%s) .dat in %s', ...
+       strjoin(wsPat, ' / '),  datDir);
+assert(nWAT > 0, 'No water-reference (%s) .dat in %s',  ...
+       strjoin(watPat, ' / '), datDir);
 
 [~, iWS]  = max(nadMid);
 [~, iWAT] = max(watMid);

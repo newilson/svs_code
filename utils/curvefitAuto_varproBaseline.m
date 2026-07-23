@@ -1,4 +1,4 @@
-
+﻿
 function output = curvefitAuto_varproBaseline(x,y,mode,amp0,center0,width0,ph_range,minw,baselineOpt,lineShapeOpt)
 % curvefitAuto_varproBaseline - nonlinear curve fitting for
 % multiple peaks with variable-projection spline baseline fitting and an
@@ -34,6 +34,11 @@ function output = curvefitAuto_varproBaseline(x,y,mode,amp0,center0,width0,ph_ra
 %                               least squares (default ones = uniform)
 %                .widthBounds = [min max] linewidth bounds in x-units
 %                               (scalar row or [n x 2] per-peak)
+%                .priorBaseline / .lambdaPrior = soft prior pulling the spline
+%                               toward a supplied baseline estimate
+%                .priorWidth  / .lambdaWidth  = soft prior pulling each peak's
+%                               total linewidth toward a supplied estimate
+%                               (modes 5/7 only).  See parseBaselineOpt.
 %   lineShapeOpt - struct with shared additional lineshape options:
 %                .enable      = true/false     (default false)
 %                .nSide       = number of kernel points on one side
@@ -110,6 +115,14 @@ if ~isempty(baselineOpt.weights)
     end
 else
     w = ones(np, 1);
+end
+
+% rms weighted signal -- the scale the soft priors are normalised against, so
+% that lambdaPrior / lambdaWidth are dimensionless and portable between
+% datasets with different absolute scaling.
+rmsWY = sqrt(mean((w .* y).^2));
+if ~isfinite(rmsWY) || rmsWY <= 0
+    rmsWY = 1;
 end
 
 % Initial guesses
@@ -324,7 +337,7 @@ pars = min(max(pars, lb), ub);
 if size(x)==size(y'), y = y'; end
 
 oldoptions = optimset('lsqnonlin');
-% Default relative tolerances — scaled by SSR of the data so behavior
+% Default relative tolerances â€” scaled by SSR of the data so behavior
 % is independent of data amplitude.  Override with baselineOpt fields.
 ssrData = sum((w .* y).^2);
 relTolFun = 1e-6;  relTolX = 1e-9; % default tolerances
@@ -481,17 +494,35 @@ switch mode
     case 7, basisFn = @voigt_magnitude_basis;     wRefAll = Acoef*abs(ip_nonlin((1:n)+n)) + abs(ip_nonlin((1:n)+2*n));
     otherwise, basisFn = []; wRefAll = abs(width(:));
 end
+% Quantitation must be PHASE-INVARIANT: a peak's area is a property of the
+% molecule, not of whatever phase the fit assigned it.  The complex basis
+% carries a per-peak phase (modes 3/4/5 store it at ip(2n+(1:n))), and
+% real(component) is scaled by ~cos(phase) -- so integrating the component
+% AS FITTED makes the area shrink with residual phase (e.g. a Trp component
+% landing at -27 deg loses ~11% of its area for no physical reason).  We
+% instead integrate the ZERO-PHASE model peak: the same fitted position,
+% widths and shared lineshape kernel (kept, because capturing kernel /
+% Gaussian-Lorentzian shape is the whole point of an area rather than an
+% amplitude), but with the phase set to 0.  The amplitude `ampl` is left as
+% fit -- only the phase rotation is removed.  This makes areasConv the
+% frequency-domain equivalent of |complex amplitude|.
+ip_area = ip_nonlin;
+if mode==3 || mode==4 || mode==5
+    ip_area(2*n + (1:n)) = 0;    % zero the per-peak phase block
+end
 if ~isempty(basisFn)
     padX     = padFactor * max(wRefAll);
     dxIn     = mean(abs(diff(x)));
     xExt     = ((min(x) - padX) : dxIn : (max(x) + padX)).';
-    ApeakExt = basisFn(ip_nonlin, xExt);             % kernel applied inside
+    ApeakExt = basisFn(ip_area, xExt);               % zero-phase; kernel applied inside
     y_comp_ext = ApeakExt .* ampl(:).';
     output.areasConv = trapz(xExt, real(y_comp_ext), 1);
     output.areasConvPad = padX;                      % for diagnostics
 else
     % Unknown mode: fall back to in-window trapz of the post-kernel comp.
-    output.areasConv = trapz(x(:), real(y_comp), 1);
+    % No basisFn to rebuild, so fall back to |complex component| to stay
+    % phase-invariant (real(comp) would carry the cos(phase) scaling).
+    output.areasConv = trapz(x(:), abs(y_comp), 1);
     output.areasConvPad = 0;
 end
 output.fit = yfit;
@@ -509,47 +540,77 @@ output.mode = mode;
 output.baselineOpt = baselineOpt;
 output.lineShapeOpt = lineShapeOpt;
 
-%% residual functions (nested — share parent workspace: x, y, w, n, B, amplUB, baselineOpt, lineShapeOpt, nPeakPars)
+%% residual functions (nested â€” share parent workspace: x, y, w, n, B, amplUB, baselineOpt, lineShapeOpt, nPeakPars)
+
+% Soft prior on peak linewidth, appended to the residual vector so lsqnonlin
+% trades width error against data misfit instead of hitting a hard bound.
+% A hard cap forces the width to the bound and dumps the discrepancy into the
+% amplitude; a penalty lets a genuinely broad peak stay broad if the data
+% insist, while stopping a peak from running away to absorb baseline.
+% Compares the TOTAL Voigt FWHM (Olivero-Longbothum, the same relation used to
+% seed widthG at setup) against the prior, since that is what an HSVD
+% linewidth measures.
+function rw = widthPriorResidual(ip)
+    rw = zeros(0,1);
+    if baselineOpt.lambdaWidth <= 0 || isempty(baselineOpt.priorWidth), return; end
+    pw = baselineOpt.priorWidth(:);
+    if numel(pw) ~= n, return; end
+    switch mode
+        case {5,7}   % complex / magnitude Voigt: [center, widthL, ph, widthG]
+            wL = abs(ip(n   + (1:n)));
+            wG = abs(ip(3*n + (1:n)));
+            wt = Acoef*wL(:) + sqrt(Bcoef*wL(:).^2 + wG(:).^2);
+        otherwise
+            return;                      % width layout not verified for other modes
+    end
+    ok = isfinite(pw) & pw > 0;
+    if ~any(ok), return; end
+    % Normalise so lambdaWidth is dimensionless and comparable to the data
+    % term: scale by the rms weighted signal, and by sqrt(npts/npeaks) so the
+    % few width residuals carry the same total weight as the many data ones.
+    sc = sqrt(baselineOpt.lambdaWidth * numel(y) / sum(ok)) * rmsWY;
+    rw = sc * (wt(ok) - pw(ok)) ./ pw(ok);
+end
 function r = residual_gaussian(ip)
     Apeak = gaussian_basis(ip, x);
     [~, ~, ~, yfit] = solve_linear_block(Apeak, B, y);
-    r = w .* (yfit - y);
+    r = [w .* (yfit - y); widthPriorResidual(ip)];
 end
 
 function r = residual_lorentzian(ip)
     Apeak = lorentzian_basis(ip, x);
     [~, ~, ~, yfit] = solve_linear_block(Apeak, B, y);
-    r = w .* (yfit - y);
+    r = [w .* (yfit - y); widthPriorResidual(ip)];
 end
 
 function r = residual_lorentzian_complex(ip)
     Apeak = lorentzian_complex_basis(ip, x);
     [~, ~, ~, yfit] = solve_linear_block(Apeak, B, y);
-    r = w .* (yfit - y);
+    r = [w .* (yfit - y); widthPriorResidual(ip)];
 end
 
 function r = residual_gaussian_complex(ip)
     Apeak = gaussian_complex_basis(ip, x);
     [~, ~, ~, yfit] = solve_linear_block(Apeak, B, y);
-    r = w .* (yfit - y);
+    r = [w .* (yfit - y); widthPriorResidual(ip)];
 end
 
 function r = residual_voigt_complex(ip)
     Apeak = voigt_complex_basis(ip, x);
     [~, ~, ~, yfit] = solve_linear_block(Apeak, B, y);
-    r = w .* (yfit - y);
+    r = [w .* (yfit - y); widthPriorResidual(ip)];
 end
 
 function r = residual_lorentzian_magnitude(ip)
     Apeak = lorentzian_magnitude_basis(ip, x);
     [~, ~, ~, yfit] = solve_linear_block(Apeak, B, y);
-    r = w .* (yfit - y);
+    r = [w .* (yfit - y); widthPriorResidual(ip)];
 end
 
 function r = residual_voigt_magnitude(ip)
     Apeak = voigt_magnitude_basis(ip, x);
     [~, ~, ~, yfit] = solve_linear_block(Apeak, B, y);
-    r = w .* (yfit - y);
+    r = [w .* (yfit - y); widthPriorResidual(ip)];
 end
 
 %% linear solve for amplitudes + spline coefficients
@@ -567,7 +628,22 @@ function [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, Bmat, 
         rhsw = [rhsw; zeros(size(D,1),1)];
     end
 
-    % penalize peak amplitudes toward zero — prevents the solver from
+    % Soft prior pulling the spline toward a supplied baseline estimate.
+    % Penalises the CURVE difference ||w.*(B*beta - prior)||^2 rather than the
+    % coefficient difference, so the strength does not depend on how the
+    % B-spline basis happens to be scaled, and the prior needs to be
+    % representable only to the accuracy the basis allows (lsqlin lands on the
+    % projection of the prior onto the basis, which is exactly what we want).
+    if nb>0 && baselineOpt.lambdaPrior>0 && ~isempty(baselineOpt.priorBaseline)
+        pb = baselineOpt.priorBaseline(:);
+        if numel(pb) == numel(w)
+            sp = sqrt(baselineOpt.lambdaPrior);
+            Xw   = [Xw;   sp * [zeros(numel(w),nloc), w .* Bmat]];
+            rhsw = [rhsw; sp * (w .* pb)];
+        end
+    end
+
+    % penalize peak amplitudes toward zero â€” prevents the solver from
     % assigning amplitude to peaks with no supporting signal
     if baselineOpt.lambdaAmpl > 0
         Xw = [Xw; sqrt(baselineOpt.lambdaAmpl)*eye(nloc) zeros(nloc,nb)];
@@ -729,7 +805,7 @@ end
 
 end % end of main function curvefitAuto_varproBaseline
 
-%% unit-amplitude line shape functions (local — no parent workspace access needed)
+%% unit-amplitude line shape functions (local â€” no parent workspace access needed)
 function yfit = composite_unit(ip,x)
     p = ip(2);
     w = abs(ip(3));
@@ -899,6 +975,29 @@ function opt = parseBaselineOpt(x, opt)
     if ~isfield(opt,'linearTol') || isempty(opt.linearTol)
         opt.linearTol = 1e-10;
     end
+    % --- HSVD-derived soft priors (both default OFF) --------------------
+    % .priorBaseline [npts x 1] a baseline estimate on the same x grid, in the
+    %                same phase frame as y (e.g. the unassigned-component sum
+    %                from an HSVD decomposition).  Pulled toward, not imposed.
+    % .lambdaPrior   weight for it.  The penalty is ||w.*(B*beta - prior)||^2,
+    %                weighted exactly like the data term, so lambdaPrior = 1
+    %                means "trust the prior as much as the data", 0.1 a gentle
+    %                nudge, 0 off.
+    % .priorWidth    [n x 1] prior TOTAL linewidth per peak, x-units.  NaN or
+    %                <=0 entries are skipped (e.g. peaks HSVD did not find).
+    % .lambdaWidth   weight for it.  Normalised so lambdaWidth = 1 means a
+    %                100% relative width error costs the same total
+    %                sum-of-squares as a 100% relative misfit on the data.
+    %                Only modes 5 and 7 (Voigt) are supported; other modes
+    %                silently apply no width prior.
+    if ~isfield(opt,'lambdaPrior') || isempty(opt.lambdaPrior)
+        opt.lambdaPrior = 0;
+    end
+    if ~isfield(opt,'priorBaseline'), opt.priorBaseline = []; end
+    if ~isfield(opt,'lambdaWidth') || isempty(opt.lambdaWidth)
+        opt.lambdaWidth = 0;
+    end
+    if ~isfield(opt,'priorWidth'), opt.priorWidth = []; end
     if ~isfield(opt,'lambdaAmpl') || isempty(opt.lambdaAmpl)
         opt.lambdaAmpl = 0;
     end
