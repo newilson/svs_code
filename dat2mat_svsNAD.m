@@ -22,9 +22,12 @@ thisPath = fileparts(thisFile);
 addpath([thisPath filesep 'utils']);
 addpath([thisPath filesep 'mapVBVD']);
 
+% Warning only -- unknown fields are never fatal, and the schema below WILL fall behind as options are added.
+checkParsFields(pars);
+
 % defaults
-if ~isfield(pars,'plt') || isempty(pars.plt), pars.plt = false; end % debugging plots
-if ~isfield(pars,'pltSpec') || isempty(pars.pltSpec), pars.pltSpec = true; end % plot final spectrum
+if ~isfield(pars,'plt') || isempty(pars.plt), pars.plt = false; end % debugging/fitting plots
+if ~isfield(pars,'pltSpec') || isempty(pars.pltSpec), pars.pltSpec = true; end % plot final spectrum before fitting
 if ~isfield(pars,'removeOS') || isempty(pars.removeOS), pars.removeOS = false; end
 if ~isfield(pars,'lb') || isempty(pars.lb), pars.lb = 0; end
 if ~isfield(pars,'lb_met') || isempty(pars.lb_met), pars.lb_met = pars.lb; end
@@ -42,6 +45,7 @@ if ~isfield(pars,'base'), pars.base = nan; end
 if ~isfield(pars,'hsvd') || ~isfield(pars.hsvd,'flag'), pars.hsvd.flag = false; end
 if ~isfield(pars.hsvd,'sv'), pars.hsvd.sv = []; end % HSVD singular values
 if ~isfield(pars.hsvd,'cad'), pars.hsvd.cad = 3; end % HSVD Cadzow iterations
+if isfield(pars,'pc'), pars.PC = pars.pc; end
 if ~isfield(pars,'PC'), pars.PC = 0; end
 if ~isfield(pars,'dofit'), pars.dofit = false; end
 if pars.dofit
@@ -199,7 +203,7 @@ if iscell(ws_obj)
 end
 output.met.refvolt = ws_obj.hdr.Dicom.flTransRefAmpl;
 if ~isequal(output.met.refvolt, output.wat.refvolt)
-    warning('Mismatch in reference voltage between WAT REF and MET scans');
+    warning('Reference voltage mismatch between WATREF (%.1f V) and MET (%.1f V) scans', output.wat.refvolt, output.met.refvolt);
 end
 ws_obj.image.flagRemoveOS = false; % oversampling
 ws_obj.image.flagAverageSets = false; % cmrr sequence uses 'sets' variable for avgs
@@ -584,7 +588,7 @@ end
 % end
 
 if pars.pltSpec
-    figure('Name','1H processed spectrum'), plot(ppm,real(ws)), title(fname), set(gca,'xdir','reverse')
+    figure('Name','1H processed spectrum'), plot(ppm,real(ws),'-k'), title(fname), set(gca,'xdir','reverse')
 end
 
 
@@ -630,6 +634,7 @@ if pars.dofit
         % default expanded peak table (de Graaf et al., MRM 2017)
         % NAD+ H2/H6/H4, NAA amide, and 8 unspecified singlets from
         % adenosine, ATP, macromolecules in the downfield region
+        
         if isempty(pars.peaks) || ~isfield(pars.peaks,'range') || ~isfield(pars.peaks,'name')
             pars.peaks.name  = {'NADH2','NADH6','NADH4','NAA_NH', ...
                                 'S1','S2','S3','S4','S5','S6','S7','S8'};
@@ -666,8 +671,7 @@ if pars.dofit
 
         % --- Broad component handling (consistent with the 31P pipeline) -----
         % Peaks whose name starts with 'Broad' are wide macromolecular/baseline
-        % components (cf. 'BroadMP','Broad10_5' in processU01_Brain_31P).  They
-        % get wide linewidth bounds and a broad initial width, and are excluded
+        % components. They get wide linewidth bounds and a broad initial width, and are excluded
         % from the coarse phase fit (they are nuisance signal, not phase
         % references).  Everything else keeps the default narrow bounds.
         npksAll = numel(pars.peaks.name);
@@ -681,19 +685,15 @@ if pars.dofit
         if isfield(pars.fit,'broadWidthBounds') && ~isempty(pars.fit.broadWidthBounds)
             broadWB = pars.fit.broadWidthBounds;
         else
-            broadWB = [65/f0 180/f0];   % ~0.22-0.61 ppm: broader than the narrow
-                                        % peaks but a local hump, not a window-wide
-                                        % blob that competes with the spline
+            broadWB = [65/f0 180/f0];   % ~0.22-0.61 ppm: broader than the narrow peaks. Optimized for 7T.
         end
         if isfield(pars.fit,'broadWidthInit') && ~isempty(pars.fit.broadWidthInit)
             broadW0 = pars.fit.broadWidthInit;
         else
             broadW0 = 150/f0;           % ~0.5 ppm init (cf. 31P 100 Hz)
         end
-        % broad components are kept near-absorptive: a smooth macromolecular
-        % baseline should not carry dispersive (phased) character, otherwise it
-        % spreads broadly negative and the spline arches above the data to
-        % cancel it (a spline<->broad degeneracy).
+
+        % broad components are kept near-absorptive
         if isfield(pars.fit,'broadPhaseBounds') && ~isempty(pars.fit.broadPhaseBounds)
             broadPB = pars.fit.broadPhaseBounds;
         else
@@ -755,8 +755,7 @@ if pars.dofit
         %   .name     - optional label
         %   .mode/.ph_range/.baselineOpt/.lineShapeOpt/.focusRange/.focusWeight
         %             - optional per-region overrides of the shared settings
-        % When unset, a single implicit region spans the coarse range with
-        % every peak, reproducing the original single-region behaviour.
+        % When unset, a single implicit region spans the coarse range. 
         % pars.fit.coarseMode controls how coarse fit + phase correction are
         % derived for multiple regions:
         %   'perRegion' (default) - independent coarse->phase->fine per region
@@ -835,9 +834,7 @@ if pars.dofit
             hsvdC = pars.fit.hsvdCoarse;
         end
 
-        % Which peaks the coarse HSVD actually found a qualifying component
-        % for.  Only those get a linewidth prior in the fine fit; for the rest
-        % width0_all is just a fallback default, not evidence.
+        % Peaks the coarse HSVD actually found a qualifying component for.
         foundAll = false(1, npks);
 
         if strcmp(coarseMode,'union')
@@ -963,23 +960,18 @@ if pars.dofit
             baseR.phaseBounds = pbR;
 
             % ---- HSVD-derived soft priors ------------------------------
-            % The coarse HSVD step already produces exactly the two things the
-            % fine fit is otherwise guessing at: the unassigned-component sum
+            % The coarse HSVD step already produces the unassigned-component sum
             % (a direct measurement of the baseline under these peaks) and a
             % per-peak linewidth.  Feed both in as PRIORS, not constraints --
             % baselineOpt.lambdaPrior / .lambdaWidth control how hard the fit
-            % is pulled toward them, and 0 reproduces the old behaviour.
-            % priorBaseline must be in the same phase frame as y_r, which is
-            % why nadCoarsePhase stores baselinePhased alongside .baseline.
+            % is pulled toward them, and 0 reproduces the old behavior.
             cfR = coarseStore{r};
             baseR.priorBaseline = [];
             if isstruct(cfR) && isfield(cfR,'baselinePhased') && ...
                     numel(cfR.baselinePhased) == numel(inds_r)
                 baseR.priorBaseline = cfR.baselinePhased;
             end
-            % Width prior: the HSVD linewidth seed, but only for peaks HSVD
-            % actually found -- for the others width0_all is just a default
-            % and would be a prior with no evidence behind it.
+            % Width prior: the HSVD linewidth seed, but only for peaks HSVD actually found 
             pwR = width0_all(sel);
             pwR(~foundAll(sel)) = NaN;      % NaN entries are skipped downstream
             baseR.priorWidth = pwR;
@@ -1017,14 +1009,13 @@ if pars.dofit
                 title(sprintf('Step 2: Fine VARPRO fit (region %d: %s)', r, regionLabel(regionList,r)))
 
                 % per-component diagnostic plots (overlay + per-peak gallery),
-                % mirroring the 31P basisVarpro plots
                 rLbl    = regionLabel(regionList, r);
                 pkNames = pars.peaks.name(sel);
                 ttl     = sprintf('1H fit - region %d: %s', r, rLbl);
                 fOv = plot_varpro_1h(x_r, y_r, outR, pkNames, ttl);
                 set(fOv, 'Name', sprintf('1H varpro fit - region %d %s', r, rLbl));
-                fGl = plot_componentSpectra_1h(x_r, y_r, outR, pkNames, ttl);
-                set(fGl, 'Name', sprintf('1H component spectra - region %d %s', r, rLbl));
+                % fGl = plot_componentSpectra_1h(x_r, y_r, outR, pkNames, ttl);
+                % set(fGl, 'Name', sprintf('1H component spectra - region %d %s', r, rLbl));
             end
         end
 
@@ -1033,9 +1024,7 @@ if pars.dofit
         unionInds = find(ppm > min(allRanges(:)) & ppm < max(allRanges(:)));
         x = ppm(unionInds);
 
-        % reconstruct a flat peak-ordered pars/lb/ub when all regions share
-        % one lineshape mode (peak blocks only; per-region lineshape kernels
-        % and full detail live in output.met.fit.region(r).fit)
+        % Each region is fit independently. Downstream code expects one vector of pars.
         if all(modesUsed == modesUsed(1))
             switch modesUsed(1)
                 case {1,2,6}, nBlk = 3;
@@ -1074,11 +1063,7 @@ if pars.dofit
         output.met.fit.pars      = parsFlat;
         output.met.fit.parnames  = parnamesFlat;
         output.met.fit.areas     = areasAll;
-        % Kernel-aware areas: integrates the convolved per-peak component
-        % (see curvefitAuto_varproBaseline).  When pars.fit.lineShapeOpt is
-        % enabled, `areas` (base-Voigt only) under-counts by the kernel sum;
-        % `areasConv` is the right metric to feed absoluteQuant_svs against
-        % a kernel-aware water area.
+        % Kernel-aware areas
         output.met.fit.areasConv = areasConvAll;
         output.met.fit.names     = pars.peaks.name;
         output.met.fit.ppm       = x;
@@ -1181,15 +1166,7 @@ if pars.dofit
                 end
 
                 watBaseOpt = watfit.baselineOpt;
-                % The metabolite fit may carry PER-PEAK linewidth bounds (one
-                % row per entry in pars.peaks.name).  Those rows are meaningless
-                % here -- this fit has nWatComp components, not npeaks -- and
-                % curvefitAuto_varproBaseline would try to assign npeaks bounds
-                % to nWatComp peaks and error.  Collapse to the enclosing
-                % [min max] row, which for a uniform metabolite setting
-                % reproduces exactly the single row the water fit used to
-                % inherit (so the water area, and every concentration derived
-                % from it, is unchanged).
+                % The metabolite fit may carry PER-PEAK linewidth bounds. Those rows are meaningless here.
                 if isfield(watBaseOpt,'widthBoundsHz')
                     watBaseOpt = rmfield(watBaseOpt,'widthBoundsHz');
                 end
@@ -1239,17 +1216,7 @@ if pars.dofit
                 else
                     output.wat.fit.areasConv = watFitOutput.areas;
                 end
-                % areaTotal = canonical kernel-aware water area: sum of the
-                % per-component areasConv (extended-axis trapz of the
-                % convolved component, see curvefitAuto_varproBaseline.m).
-                % Recovers tails past the fit window via lineShapeOpt
-                % .areaPadFactor (default 10).  areaTotalWin is the older
-                % in-window trapz of (fit - baseline), kept for back-compat;
-                % the two agree to a fraction of a percent for Voigt water
-                % but can differ by several percent when the water base is
-                % Lorentzian (mode 3) because 1/x^2 wings converge slowly.
-                % areaBase = sum(ampl .* width) is the legacy base-Voigt
-                % measure.
+                % areaTotal = canonical kernel-aware water area
                 output.wat.fit.areaTotal    = sum(output.wat.fit.areasConv);
                 output.wat.fit.areaTotalWin = trapz(xw(:), watFitOutput.fit(:) - watFitOutput.baseline(:));
                 output.wat.fit.areaBase     = sum(watFitOutput.areas);
@@ -1393,26 +1360,6 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
 % region's peaks (center0/width0/ph0), the applied phase (pc0/pc1), and a
 % coarse fit struct (.fit = assigned components, .baseline = unassigned).
 %
-% WHY HSVD (Jul 2026): the previous coarse VARPRO fit (kept commented out
-% below) estimated per-peak phase from a nonlinear fit that had to solve for
-% a spline baseline at the same time.  Measured on the 12 DFS control
-% subjects it left a residual phase ramp of ~74 deg/ppm (~118 deg across
-% 8.7-10.3), and the pc1 it applied correlated only r=0.34 with what needed
-% correcting -- i.e. it was close to noise.  HSVD is a linear/eigendecom-
-% position: no baseline model, no initial guess, no local minima, and each
-% component's phase falls straight out of angle(amp).  Used here for SEEDING
-% AND PHASE ONLY -- areas still come from the fine VARPRO fit, because the
-% lw_max criterion below truncates broad wings and would bias areas low
-% (that is exactly why SpecTickle's absolute NAD numbers run high).
-%
-% Component -> peak assignment uses SpecTickle's criteria (see
-% spectickle_engine.m:502-515): a component belongs to a peak if its ppm is
-% inside the peak's range AND its linewidth is within [lwMinHz lwMaxHz] AND
-% its phase is within +/-phaseTolDeg.  Multiple components on one peak are
-% combined as SpecTickle's ampcmplx = complex sum, so the seed phase is
-% angle(sum(amp)) -- which correctly represents a narrow-core + broad-wing
-% pair as one effective line.
-%
 % hsvdOpt fields (all optional):
 %   .enable      true (set false to fall back to the VARPRO block below)
 %   .K           60    HSVD order              (SpecTickle opt.hsvd_order)
@@ -1452,11 +1399,6 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
     end
 
     % ---- HSVD on the FID underlying this spectrum -----------------------
-    % ws was formed as fftshift(fft(fid)), so ifft(ifftshift(ws)) recovers it
-    % exactly -- including whatever fid(1) convention was used upstream.  No
-    % first-point rescaling is applied here on purpose: the HSVD result is
-    % only used for phase/center/width, all of which are invariant to a
-    % single real scale factor on the FID.
     N   = numel(ppm);
     bw  = N * f0 * abs(ppm(2) - ppm(1));   % Hz; ppm step = bw/(N*f0)
     dt  = 1/bw;
@@ -1470,7 +1412,7 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
     lwHz = dHz(:)/pi;                    % Lorentzian FWHM, Hz
     phC  = angle(amp(:)) * 180/pi;       % component phase, deg
 
-    % ---- assign components to peaks (SpecTickle criteria) ---------------
+    % ---- assign components to peaks ---------------
     nC       = numel(ppmC);
     assigned = false(nC, 1);
     found    = false(np, 1);
@@ -1482,7 +1424,7 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
         if ~any(sel), continue; end
         assigned = assigned | sel;
         found(kk) = true;
-        A  = sum(amp(sel));                    % SpecTickle ampcmplx
+        A  = sum(amp(sel));                    
         w  = abs(amp(sel));
         sig(kk)     = abs(A);
         ph0(kk)     = angle(A) * 180/pi;
@@ -1496,8 +1438,6 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
 
     % ---- linear phase (pc0 + pc1) through this region's peaks -----------
     % Weighted by signal^2 so the slope is set by the well-determined peaks.
-    % Unweighted polyfit let Trp -- lowest SNR and the longest lever arm --
-    % dominate p(1), which is what broke the old estimate.
     use = find(found);
     if numel(use) < 2 || (max(center0(use)) - min(center0(use))) < 10*eps
         pc0 = 0;
@@ -1517,19 +1457,15 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
     end
     wsP = shiftSpectrumPhase(ws, [pc0 pc1], ppm, center_freq);
 
-    % ---- synthesise a coarseFit struct from the components --------------
-    % .fit = peak-assigned components, .baseline = everything else, which is
-    % the same partition SpecTickle draws.  Keeps downstream (.coarse.fit /
-    % .coarse.baseline at lines ~1037) and the diagnostic plot working.
+    % ---- synthesize a coarseFit struct from the components --------------
+    % .fit = peak-assigned components, .baseline = everything else
     tf  = (0:N-1)' * dt;
     Yc  = exp(tf * (-dHz(:).' + 1i*2*pi*fHz(:).')) .* amp(:).';
     Sc  = fftshift(fft(Yc, [], 1), 1);
     coarseFit.fit      = real(sum(Sc(inds,  assigned), 2));
     coarseFit.baseline = real(sum(Sc(inds, ~assigned), 2));
     % Same partition, but rotated by the phase correction this region is about
-    % to apply, so it lives in the SAME frame as the data the fine fit sees
-    % (y_r = real(wsP(inds_r))).  .baseline above is in the raw frame and is
-    % kept for the diagnostic plot; THIS is the one to use as a baseline prior.
+    % to apply; THIS is the one to use as a baseline prior.
     phvec = exp(-1i*pi/180*(pc0 + 2*pc1/abs(ppm(end)-ppm(1)) * (ppm(:)-center_freq)));
     coarseFit.baselinePhased = real(sum(Sc(inds, ~assigned) .* phvec(inds), 2));
     coarseFit.fitPhased      = real(sum(Sc(inds,  assigned) .* phvec(inds), 2));
@@ -1538,8 +1474,7 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
                                 'amp',amp(:), 'assigned',assigned, ...
                                 'found',found, 'signal',sig, ...
                                 'polyCoef',p, 'K',numel(ppmC));
-    % residual per-peak phase AFTER correction -- should sit near 0 if the
-    % ramp estimate is good.  This is the number to watch when tuning.
+    % residual per-peak phase AFTER correction -- should sit near 0
     coarseFit.phResidDeg = ph0 - polyval(p, center0);
 
     fprintf('  %s: HSVD %d comps, %d/%d peaks seeded; resid phase %s deg\n', ...
@@ -1548,7 +1483,7 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
 
     if plt
         figure('Name', sprintf('1H coarse HSVD - %s', label))
-        plot(x, y, 'k', x, coarseFit.fit, 'r', x, y - coarseFit.fit - coarseFit.baseline, 'g')
+        plot(x, y, 'k', x, coarseFit.fit + coarseFit.baseline, 'r', x, y - coarseFit.fit - coarseFit.baseline, 'g')
         hold on, plot(x, coarseFit.baseline, 'b--')
         legend({'data','assigned comps','residual','unassigned (baseline)'})
         set(gca,'xdir','reverse')
@@ -1556,9 +1491,7 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
     end
 
 % ----------------------------------------------------------------------
-% PREVIOUS coarse VARPRO implementation, kept for A/B against the HSVD path
-% above.  Retired Jul 2026 -- see the WHY HSVD note in the header.  To use
-% it, restore this block in place of the HSVD section (it consumes mode,
+% PREVIOUS coarse VARPRO implementation (it consumes mode,
 % baselineOpt and minw, which the HSVD path ignores).
 % ----------------------------------------------------------------------
 %     center0 = mean(peakRange, 2);
@@ -1657,4 +1590,100 @@ function out = nadFineFit(x, y, center0, width0, peakRange, baselineOpt, ...
     else
         out = curvefitAuto_varproBaseline(x, y, mode, amp0, center0, width0, ...
             ph_range, minw, bo);
+    end
+
+% =====================================================================
+function checkParsFields(pars)
+% Warn about pars fields that nothing in this pipeline reads.
+%
+% Catches two failure modes that are otherwise silent:
+%   1. Version skew -- a caller copied from a machine running newer code sets
+%      an option this file has never heard of.  The fit still runs, just with
+%      a different algorithm than the caller asked for.
+%   2. Typos and legacy names (pars.fitmode vs pars.fit.mode, pars.block_size
+%      vs pars.block_align.size), which have the same silent-no-op effect.
+%
+% WARNING ONLY, by design.  The schema below is a hand-maintained mirror of
+% what this file and the fitters it calls consume, so it will drift as options
+% are added. If you add a pars option, add it here too.
+%
+% Sub-structs handed wholesale to other routines (WatSupPre.opts,
+% WatSupPost.opts) are deliberately NOT descended into: their option sets
+% belong to those routines, not here.
+
+baselineFields = {'enable','knotSpacing','lambda','lambdaAmpl','lambdaPrior', ...
+                  'lambdaWidth','TolFun','TolX','linearTol','normalize','verbose', ...
+                  'weights','amplUB','widthBounds','widthBoundsHz','centerBounds', ...
+                  'phaseBounds','phaseInit','priorBaseline','priorWidth'};
+
+KNOWN = { ...
+  '', {'plt','pltSpec','removeOS','lb','lb_met','lb_wat','den','eccopt', ...
+       'WatSupPre','WatSupPost','peaks','ccopt','block_align','base','hsvd', ...
+       'PC','PCpivot','dofit','fit','flag','watfit','waterScaling'}; ...
+  'fit', {'mode','ph_range','ppm_range','ppm_range_coarse','baselineOpt','regions', ...
+          'coarseMode','hsvdCoarse','hsvdClean','lineShapeOpt','focusRange', ...
+          'focusWeight','broadWidthBounds','broadWidthInit','broadPhaseBounds','peaks'}; ...
+  'fit.baselineOpt',         baselineFields; ...
+  'fit.regions',             {'fitRange','peaks','name','baselineOpt','peakSelect'}; ...
+  'fit.regions.baselineOpt', baselineFields; ...
+  'fit.hsvdCoarse',          {'enable','K','npts','lwMinHz','lwMaxHz','phaseTolDeg'}; ...
+  'fit.hsvdClean',           {'enable','K','range','nuisance_freqHz'}; ...
+  'fit.lineShapeOpt',        {'enable','nSide','asymmetric','maxSide','init', ...
+                              'normalize','areaPadFactor'}; ...
+  'peaks',                   {'name','range','widthInit'}; ...
+  'watfit',                  {'method','mode','nComp','ppm_range','ph_range', ...
+                              'baselineOpt','lineShapeOpt'}; ...
+  'watfit.baselineOpt',      baselineFields; ...
+  'block_align',             {'size','method','Nfit','ppmRange','saveDebug'}; ...
+  'ccopt',                   {'minsig_frac'}; ...
+  'hsvd',                    {'flag','sv','cad'}; ...
+  'den',                     {'MLSingularValues'}; ...
+  'flag',                    {'baseCorr'}; ...
+};
+
+% Struct-array elements (pars.fit.regions) all carry the same field set, so a
+% stray field is seen once per element -- report it once.
+bad = unique(scanParsLevel(pars, '', KNOWN, {}), 'stable');
+
+if ~isempty(bad)
+    warning('dat2mat_svsNAD:unknownParsField', ...
+        ['%d pars field(s) are not read by this code and have NO effect:\n' ...
+         '    %s\n' ...
+         'If you expected these to do something, this copy of dat2mat_svsNAD.m ' ...
+         'is probably older than the caller.'], ...
+        numel(bad), strjoin(bad, sprintf('\n    ')));
+end
+
+% =====================================================================
+function bad = scanParsLevel(s, prefix, KNOWN, bad)
+% Recurse one level of pars, collecting field paths absent from the schema.
+% Levels with no schema entry are not checked at all (their options belong to
+% some other routine), so a missing entry can only ever under-report.
+
+    if ~isstruct(s) || isempty(s), return; end
+
+    idx = find(strcmp(KNOWN(:,1), prefix), 1);
+    if isempty(idx), return; end
+    allowed = KNOWN{idx,2};
+
+    fn = fieldnames(s);
+    for k = 1:numel(fn)
+        if isempty(prefix)
+            here = fn{k};
+        else
+            here = [prefix '.' fn{k}];
+        end
+
+        if ~any(strcmp(fn{k}, allowed))
+            bad{end+1} = ['pars.' here]; %#ok<AGROW>
+            continue
+        end
+
+        % Struct arrays (pars.fit.regions) get every element checked.
+        v = s(1).(fn{k});
+        if isstruct(v)
+            for e = 1:numel(v)
+                bad = scanParsLevel(v(e), here, KNOWN, bad);
+            end
+        end
     end

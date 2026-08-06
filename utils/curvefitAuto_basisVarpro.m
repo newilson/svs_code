@@ -2,8 +2,7 @@ function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo,
 % curvefitAuto_basisVarpro - LCModel/Osprey-style basis-set fitting with
 % variable-projection spline baseline for 31P (or other) MR spectra.
 %
-% Fits a measured MR spectrum as a linear combination of simulated (or
-% measured) basis FIDs. Each basis component is perturbed by an independent
+% Fits a measured MR spectrum as a linear combination of basis FIDs. Each basis component is perturbed by an independent
 % set of nonlinear parameters (frequency shift, Lorentzian broadening,
 % Gaussian broadening, zero-order phase) applied in the time domain, plus
 % an optional shared first-order phase term applied in the frequency
@@ -573,9 +572,7 @@ output.basisInfo      = basisInfo;
 
         % Apply optional shared lineshape kernel (peak basis only — the
         % spline baseline is unaffected because it lives in B and is
-        % solved separately in solveLinearBlock).  Convolution is run on
-        % the full N-length spectrum so that 'same' edge effects fall
-        % outside the fit window.
+        % solved separately in solveLinearBlock).
         if lineShapeOpt.enable && nLineShape > 0
             kern = buildLineShapeKernel(sidePars);
             if numel(kern) > 1
@@ -733,8 +730,7 @@ end
 
 function hz = ppmToHzByAxis(ppmVal, ppmAxis, freqAxis)
     % Find Hz value corresponding to a ppm value by nearest-point lookup on
-    % the data's ppm axis.  This avoids hard-coding a sign convention for
-    % the ppm<->Hz map.
+    % the data's ppm axis. 
     [~, idx] = min(abs(ppmAxis - ppmVal));
     hz = freqAxis(idx);
 end

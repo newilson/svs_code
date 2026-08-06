@@ -23,10 +23,24 @@ param(
     [string]$StagingRoot = 'C:\Users\CAMIPM-NW\Documents\VirtualBoxSharedFolders\CAMIPM_Ubuntu_VM2\TEMP',
     [string]$FinalOutDir = (Join-Path $SessionDir 'processed'),
     [switch]$KeepStaging,
-    [switch]$Plot          # -Plot turns on pars.plt (and pars.pltSpec for 1H)
+    [switch]$Plot,         # -Plot turns on pars.plt (and pars.pltSpec for 1H)
+    [switch]$ExtRef,       # -ExtRef adds the ~8 ppm phantom singlet to the 31P basis
+                           #   and quantifies against it (in addition to aATP).
+                           #   B1+ correction is OFF inside extRefQuant31P.
+                           #   A missing B1 series is non-fatal.
+    [double]$RefPpm  = 8.0,# external-reference chemical shift (PCr = 0)
+    [double]$RefConc = 500 # external phantom concentration [mM]
 )
 
 if ($Plot) { $pltArg = 'true' } else { $pltArg = 'false' }
+
+# 5th arg to processU01_Brain_31P: an extRef struct literal, or an empty
+# struct() which leaves the feature off (enable defaults to false).
+if ($ExtRef) {
+    $extRefArg = "struct('enable',true,'refPpm',$RefPpm,'refConc_mM',$RefConc)"
+} else {
+    $extRefArg = "struct()"
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -157,7 +171,7 @@ Invoke-Matlab "addpath('$svsCodeDir'); processU01_Brain_1H('$SessionDir','$Final
 # ---- Stage 4: 31P quant ------------------------------------------------
 # Reads *31p*.dat from $SessionDir\datfiles, uses f_CSF from $segTsv, writes
 # <scanID>_brain_31P_abs.mat directly to $FinalOutDir.
-Invoke-Matlab "addpath('$svsCodeDir'); processU01_Brain_31P('$SessionDir','$FinalOutDir','$segTsv',$pltArg); rmpath('$svsCodeDir');$pltWait"
+Invoke-Matlab "addpath('$svsCodeDir'); processU01_Brain_31P('$SessionDir','$FinalOutDir','$segTsv',$pltArg,$extRefArg); rmpath('$svsCodeDir');$pltWait"
 
 # ---- Stage 5: NAD summary to console -----------------------------------
 # Reload the two abs.mat files and print NADH2/H4/H6 (1H, uM) and

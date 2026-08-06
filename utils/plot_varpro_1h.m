@@ -43,7 +43,7 @@ if ~isempty(baseline) && any(baseline ~= 0)
 else
     legend('data','fit','Location','best');
 end
-set(ax1,'XDir','reverse');
+set(ax1,'XDir','reverse'); 
 xlabel('ppm');
 ylabel('a.u.');
 if ~isempty(titleStr)
@@ -74,7 +74,7 @@ xlabel('ppm');
 ylabel('a.u.');
 title('per-component fits (ampl in legend; raw ampl in out.areas)');
 grid on;
-ylim(yl);
+ylim(yl-mean(real(baseline)));
 
 % ---- Bottom: residual
 ax3 = subplot(3,1,3);
@@ -84,9 +84,11 @@ xlabel('ppm');
 ylabel('a.u.');
 title('residual (data - fit)');
 grid on;
-ylim(yl);
+ylim(yl-mean(yl));
 
 linkaxes([ax1 ax2 ax3], 'x');
+
+axis(ax1,'tight');
 
 % ---- Float the per-component legend in a reserved right-margin gap so
 %      the middle axes width matches the top/bottom axes (vertical alignment).

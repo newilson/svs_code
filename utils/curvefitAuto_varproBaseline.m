@@ -1,4 +1,4 @@
-﻿
+
 function output = curvefitAuto_varproBaseline(x,y,mode,amp0,center0,width0,ph_range,minw,baselineOpt,lineShapeOpt)
 % curvefitAuto_varproBaseline - nonlinear curve fitting for
 % multiple peaks with variable-projection spline baseline fitting and an
@@ -37,8 +37,8 @@ function output = curvefitAuto_varproBaseline(x,y,mode,amp0,center0,width0,ph_ra
 %                .priorBaseline / .lambdaPrior = soft prior pulling the spline
 %                               toward a supplied baseline estimate
 %                .priorWidth  / .lambdaWidth  = soft prior pulling each peak's
-%                               total linewidth toward a supplied estimate
-%                               (modes 5/7 only).  See parseBaselineOpt.
+%                               total linewidth toward a supplied estimate.
+%                               See parseBaselineOpt.
 %   lineShapeOpt - struct with shared additional lineshape options:
 %                .enable      = true/false     (default false)
 %                .nSide       = number of kernel points on one side
@@ -307,9 +307,6 @@ end
 % Optional phase initialization (deg), overriding the default
 % mean(ph_range).  Scalar -> applied to all peaks; vector of length n ->
 % per-peak.  Bounds (lb/ub) are unchanged so phase remains free to move.
-% Used by the two-stage water fit in bru2mat_svsNAD to warm-start stage 2
-% at the converged stage-1 phase, so the optimizer starts in the right
-% basin without having to rotate the input data.
 if isfield(baselineOpt,'phaseInit') && ~isempty(baselineOpt.phaseInit) ...
         && (mode==3 || mode==4 || mode==5)
     pi0 = baselineOpt.phaseInit(:).';
@@ -328,16 +325,14 @@ if ~isempty(lineShapePars0)
     ub   = [ub   lineShapeUb];
 end
 
-% safety: keep every initial guess strictly within its bounds.  Broad
-% components (wide widthBounds) or edge cases can otherwise seed widthL/widthG
-% outside [widthmin widthmax]; this is a no-op when seeds are already valid.
+% safety: keep every initial guess strictly within its bounds
 pars = min(max(pars, lb), ub);
 
 %% solve
 if size(x)==size(y'), y = y'; end
 
 oldoptions = optimset('lsqnonlin');
-% Default relative tolerances â€” scaled by SSR of the data so behavior
+% Default relative tolerances are scaled by SSR of the data so behavior
 % is independent of data amplitude.  Override with baselineOpt fields.
 ssrData = sum((w .* y).^2);
 relTolFun = 1e-6;  relTolX = 1e-9; % default tolerances
@@ -466,19 +461,6 @@ output.ub = ubout;
 output.areas = areas;
 % Kernel-aware per-peak area: integrate the convolved component on an
 % EXTENDED x-axis so peaks near the fit window edge keep their tails.
-% Why extend?  trapz over the fit window alone under-counts a peak's
-% area when the peak sits close to the window edge -- Voigt tails decay
-% slowly and the lineshape kernel adds further shoulder mass.  Rebuilding
-% the basis on a wider axis using the SAME fitted parameters + kernel
-% recovers the missing tail without re-running the optimizer.
-%
-% The pad is `areaPadFactor * maxWidth` on each side; for Voigt/Gaussian
-% the "width" used here is the full FWHM-like measure (widthL+widthG for
-% Voigt) so the pad grows with the broadest fitted peak.  When the kernel
-% is normalized to sum=1 (the default), in the infinite-window limit
-% `areasConv` converges to the analytic peak integral -- the per-peak
-% factor vs `areas` becomes a constant set only by the basis function's
-% normalization, so cross-peak ratios are restored.
 if isfield(lineShapeOpt,'areaPadFactor') && ~isempty(lineShapeOpt.areaPadFactor)
     padFactor = lineShapeOpt.areaPadFactor;
 else
@@ -494,18 +476,6 @@ switch mode
     case 7, basisFn = @voigt_magnitude_basis;     wRefAll = Acoef*abs(ip_nonlin((1:n)+n)) + abs(ip_nonlin((1:n)+2*n));
     otherwise, basisFn = []; wRefAll = abs(width(:));
 end
-% Quantitation must be PHASE-INVARIANT: a peak's area is a property of the
-% molecule, not of whatever phase the fit assigned it.  The complex basis
-% carries a per-peak phase (modes 3/4/5 store it at ip(2n+(1:n))), and
-% real(component) is scaled by ~cos(phase) -- so integrating the component
-% AS FITTED makes the area shrink with residual phase (e.g. a Trp component
-% landing at -27 deg loses ~11% of its area for no physical reason).  We
-% instead integrate the ZERO-PHASE model peak: the same fitted position,
-% widths and shared lineshape kernel (kept, because capturing kernel /
-% Gaussian-Lorentzian shape is the whole point of an area rather than an
-% amplitude), but with the phase set to 0.  The amplitude `ampl` is left as
-% fit -- only the phase rotation is removed.  This makes areasConv the
-% frequency-domain equivalent of |complex amplitude|.
 ip_area = ip_nonlin;
 if mode==3 || mode==4 || mode==5
     ip_area(2*n + (1:n)) = 0;    % zero the per-peak phase block
@@ -520,8 +490,6 @@ if ~isempty(basisFn)
     output.areasConvPad = padX;                      % for diagnostics
 else
     % Unknown mode: fall back to in-window trapz of the post-kernel comp.
-    % No basisFn to rebuild, so fall back to |complex component| to stay
-    % phase-invariant (real(comp) would carry the cos(phase) scaling).
     output.areasConv = trapz(x(:), abs(y_comp), 1);
     output.areasConvPad = 0;
 end
@@ -540,28 +508,28 @@ output.mode = mode;
 output.baselineOpt = baselineOpt;
 output.lineShapeOpt = lineShapeOpt;
 
-%% residual functions (nested â€” share parent workspace: x, y, w, n, B, amplUB, baselineOpt, lineShapeOpt, nPeakPars)
+%% residual functions 
 
-% Soft prior on peak linewidth, appended to the residual vector so lsqnonlin
-% trades width error against data misfit instead of hitting a hard bound.
-% A hard cap forces the width to the bound and dumps the discrepancy into the
-% amplitude; a penalty lets a genuinely broad peak stay broad if the data
-% insist, while stopping a peak from running away to absorb baseline.
-% Compares the TOTAL Voigt FWHM (Olivero-Longbothum, the same relation used to
-% seed widthG at setup) against the prior, since that is what an HSVD
-% linewidth measures.
+% Soft prior on peak linewidth
 function rw = widthPriorResidual(ip)
     rw = zeros(0,1);
     if baselineOpt.lambdaWidth <= 0 || isempty(baselineOpt.priorWidth), return; end
     pw = baselineOpt.priorWidth(:);
     if numel(pw) ~= n, return; end
     switch mode
-        case {5,7}   % complex / magnitude Voigt: [center, widthL, ph, widthG]
+        case 5       % complex Voigt:   [center, widthL, ph, widthG]
             wL = abs(ip(n   + (1:n)));
             wG = abs(ip(3*n + (1:n)));
             wt = Acoef*wL(:) + sqrt(Bcoef*wL(:).^2 + wG(:).^2);
+        case 7       % magnitude Voigt: [center, widthL, widthG] -- no phase block
+            wL = abs(ip(n   + (1:n)));
+            wG = abs(ip(2*n + (1:n)));
+            wt = Acoef*wL(:) + sqrt(Bcoef*wL(:).^2 + wG(:).^2);
+        case {1,2,3,4,6}   % single width parameter, which IS the total FWHM
+            w1 = abs(ip(n + (1:n)));
+            wt = w1(:);
         otherwise
-            return;                      % width layout not verified for other modes
+            return;
     end
     ok = isfinite(pw) & pw > 0;
     if ~any(ok), return; end
@@ -629,11 +597,9 @@ function [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, Bmat, 
     end
 
     % Soft prior pulling the spline toward a supplied baseline estimate.
-    % Penalises the CURVE difference ||w.*(B*beta - prior)||^2 rather than the
+    % Penalizes the CURVE difference ||w.*(B*beta - prior)||^2 rather than the
     % coefficient difference, so the strength does not depend on how the
-    % B-spline basis happens to be scaled, and the prior needs to be
-    % representable only to the accuracy the basis allows (lsqlin lands on the
-    % projection of the prior onto the basis, which is exactly what we want).
+    % B-spline basis happens to be scaled.
     if nb>0 && baselineOpt.lambdaPrior>0 && ~isempty(baselineOpt.priorBaseline)
         pb = baselineOpt.priorBaseline(:);
         if numel(pb) == numel(w)
@@ -643,7 +609,7 @@ function [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, Bmat, 
         end
     end
 
-    % penalize peak amplitudes toward zero â€” prevents the solver from
+    % penalize peak amplitudes toward zero prevents the solver from
     % assigning amplitude to peaks with no supporting signal
     if baselineOpt.lambdaAmpl > 0
         Xw = [Xw; sqrt(baselineOpt.lambdaAmpl)*eye(nloc) zeros(nloc,nb)];
@@ -764,7 +730,7 @@ end
 function Aout = applyExtraLineShape(Ain, ip)
     Aout = Ain;
     kern = buildLineShapeKernel(ip);
-    if length(kern) == 1
+    if isscalar(kern)
         return
     end
     for kk = 1:size(Ain,2)
@@ -805,7 +771,7 @@ end
 
 end % end of main function curvefitAuto_varproBaseline
 
-%% unit-amplitude line shape functions (local â€” no parent workspace access needed)
+%% unit-amplitude line shape functions (local - no parent workspace access needed)
 function yfit = composite_unit(ip,x)
     p = ip(2);
     w = abs(ip(3));
@@ -975,10 +941,10 @@ function opt = parseBaselineOpt(x, opt)
     if ~isfield(opt,'linearTol') || isempty(opt.linearTol)
         opt.linearTol = 1e-10;
     end
-    % --- HSVD-derived soft priors (both default OFF) --------------------
+    % --- Soft priors (both default OFF) --------------------
     % .priorBaseline [npts x 1] a baseline estimate on the same x grid, in the
     %                same phase frame as y (e.g. the unassigned-component sum
-    %                from an HSVD decomposition).  Pulled toward, not imposed.
+    %                from an HSVD decomposition). 
     % .lambdaPrior   weight for it.  The penalty is ||w.*(B*beta - prior)||^2,
     %                weighted exactly like the data term, so lambdaPrior = 1
     %                means "trust the prior as much as the data", 0.1 a gentle
@@ -988,8 +954,8 @@ function opt = parseBaselineOpt(x, opt)
     % .lambdaWidth   weight for it.  Normalised so lambdaWidth = 1 means a
     %                100% relative width error costs the same total
     %                sum-of-squares as a 100% relative misfit on the data.
-    %                Only modes 5 and 7 (Voigt) are supported; other modes
-    %                silently apply no width prior.
+    %                Voigt (modes 5/7) compares the Olivero-Longbothum total
+    %                FWHM; single-width modes compare the width directly.
     if ~isfield(opt,'lambdaPrior') || isempty(opt.lambdaPrior)
         opt.lambdaPrior = 0;
     end
@@ -1012,7 +978,7 @@ end
 %% extra lineshape options
 function opt = parseLineShapeOpt(opt)
     if ~isfield(opt,'enable') || isempty(opt.enable)
-        opt.enable = true;
+        opt.enable = false;
     end
     if ~isfield(opt,'nSide') || isempty(opt.nSide)
         opt.nSide = 4;
@@ -1058,16 +1024,7 @@ function [pars0, lb0, ub0, names] = initLineShapePars(opt)
         names = {'lineShape'};
     end
 
-    % Optional warm-start of the side taps.  Starting the kernel at the
-    % all-zero (lb) corner leaves the trust-region optimizer with a nearly
-    % flat gradient there, so the kernel never engages -- the fit collapses
-    % to the bare (un-convolved) peak.  Seeding the taps with a non-zero
-    % pedestal profile lets the optimizer start with an engaged kernel and
-    % refine it (analogous to baselineOpt.phaseInit for the phase term).
-    % opt.init may be a scalar (same value for every tap), a vector of
-    % length nls, or a function handle @(k) evaluated at tap offsets
-    % k = 1..nSide (broadcast across both sides when asymmetric).  Values
-    % are clamped to [lb, ub].  Default (absent/empty) preserves the
+    % Optional warm-start of the side taps. Default (absent/empty) preserves the
     % original all-zero start, so other fits are unaffected.
     if isfield(opt,'init') && ~isempty(opt.init)
         if isa(opt.init,'function_handle')

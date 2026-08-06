@@ -364,6 +364,7 @@ if pars.dofit
         % consistently across datasets.  Linear amplitudes are scale-
         % invariant; outputs are rescaled back to original units below.
         % Disabled until lambdas are retuned for the scaled data.
+        
         % fitInds = (x >= min(pars.fit.ppm_range)) & (x <= max(pars.fit.ppm_range));
         % yScale  = max(abs(y(fitInds)));
         % if yScale > 0

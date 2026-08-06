@@ -173,10 +173,25 @@ if useExtRef
     end
 end
 
-refName    = 'aATP';
+% =====================================================================
+% Reference metabolites.  Every scan is reported against BOTH internal
+% references (and, when enabled, the external phantom).  Changing reference
+% rescales all concentrations by one common factor and never alters a ratio
+% between metabolites within a scan -- the three sets exist to show how much
+% the absolute scale depends on which reference you believe.
+%   PRIMARY (the one written to absQ.metabolites) is aATP for brain.
+% =====================================================================
+refName    = 'aATP';       % primary reference for brain
 refConc_mM = 2.7;          % [aATP]_brain (parenchyma), placeholder
 refIdx     = find(strcmp({metProps.name}, refName), 1);
 assert(~isempty(refIdx), 'Reference %s missing from metProps', refName);
+
+% Secondary internal reference, reported alongside.
+% [PCr]_brain PLACEHOLDER -- brain PCr is roughly 3.0-3.5 mM at 7T
+% (Hetherington MRM 2001;45:46; Lu NMR Biomed 2014;27:1135).  EDIT BEFORE
+% PUBLICATION USE, exactly like the T1/T2 table above.
+altRefName    = 'PCr';
+altRefConc_mM = 3.5;
 
 % =====================================================================
 % Tissue fractions from brainseg.sh TSV (stored for QC; NOT used in quant
@@ -247,46 +262,26 @@ else
     error('processU01_Brain_31P: no fit results found in dat2mat_svs31p output');
 end
 
-[areaRef, T1ref, T2ref, nPref] = lookup_fit(refName, fitNames, fitAreas, metProps);
-Rref = relax(TR_ms, TE_ms, T1ref, T2ref);
-
-nFit = numel(fitNames);
 absQ = struct();
-absQ.reference = struct('name',refName,'conc_mM',refConc_mM, ...
-                        'T1_ms',T1ref,'T2_ms',T2ref,'nPhos',nPref,'R',Rref);
 absQ.fCSF      = fCSF;
 absQ.TR_ms     = TR_ms;
 absQ.TE_ms     = TE_ms;
-absQ.metabolites = struct('name',{},'area',{},'conc_mM',{}, ...
-                          'T1_ms',{},'T2_ms',{},'nPhos',{},'R',{},'ratio',{});
 
-for k = 1:nFit
-    nm_k = fitNames{k};
-    if strcmp(nm_k,'RefExt'), continue; end   % external ref: quantified separately below
-    pIdx = find(strcmp({metProps.name}, nm_k), 1);
-    if isempty(pIdx)
-        warning('No T1/T2/nPhos entry for %s -- skipping quant', nm_k);
-        continue
-    end
-    T1_k = metProps(pIdx).T1_ms;
-    T2_k = metProps(pIdx).T2_ms;
-    nP_k = metProps(pIdx).nPhos;
-    R_k  = relax(TR_ms, TE_ms, T1_k, T2_k);
+% Quantify against BOTH internal references.  No (1 - fCSF) term in either:
+% aATP and PCr are themselves CSF-absent, so the dilution cancels in the
+% S_M/S_ref ratio.
+absQ.byRef.(refName)    = refQuant31P(refName,    refConc_mM, ...
+                                      fitNames, fitAreas, metProps, TR_ms, TE_ms);
+absQ.byRef.(altRefName) = refQuant31P(altRefName, altRefConc_mM, ...
+                                      fitNames, fitAreas, metProps, TR_ms, TE_ms);
 
-    ratio   = fitAreas(k) / areaRef;
-    % No (1 - fCSF) term: with an internal reference (aATP) that is also
-    % CSF-absent, the CSF dilution cancels in the S_M/S_aATP ratio.
-    conc_mM = ratio * (Rref / R_k) * (nPref / nP_k) * refConc_mM;
+% Primary reference (aATP for brain) stays in absQ.reference/absQ.metabolites
+% so every existing consumer of this .mat keeps working unchanged.
+absQ.reference   = absQ.byRef.(refName).reference;
+absQ.metabolites = absQ.byRef.(refName).metabolites;
 
-    absQ.metabolites(end+1) = struct( ...
-        'name', nm_k, 'area', fitAreas(k), 'conc_mM', conc_mM, ...
-        'T1_ms', T1_k, 'T2_ms', T2_k, 'nPhos', nP_k, ...
-        'R', R_k, 'ratio', ratio); %#ok<AGROW>
-end
-
-for k = 1:numel(absQ.metabolites)
-    fprintf('%-10s : %.4g mM\n', absQ.metabolites(k).name, absQ.metabolites(k).conc_mM);
-end
+fprintf('\n--- 31P concentrations [mM] by reference ---\n');
+printByRef(absQ.byRef, {refName, altRefName});
 
 [~, scanID] = fileparts(SessionDir);
 
@@ -330,6 +325,37 @@ rmpath(fullfile(fileparts(mfilename('fullpath')), 'utils'));
 end
 
 % =====================================================================
+function printByRef(byRef, order)
+% Side-by-side table of the internal-reference concentration sets.
+names = {};
+for i = 1:numel(order)
+    s = byRef.(order{i});
+    if s.ok, names = union(names, {s.metabolites.name}, 'stable'); end
+end
+if isempty(names), fprintf('  (no reference set available)\n'); return; end
+
+fprintf('  %-12s', 'metabolite');
+for i = 1:numel(order)
+    s = byRef.(order{i});
+    fprintf(' %14s', sprintf('%s=%gmM', order{i}, s.reference.conc_mM));
+end
+fprintf('\n');
+for k = 1:numel(names)
+    fprintf('  %-12s', names{k});
+    for i = 1:numel(order)
+        s = byRef.(order{i});
+        v = NaN;
+        if s.ok
+            j = find(strcmp({s.metabolites.name}, names{k}), 1);
+            if ~isempty(j), v = s.metabolites(j).conc_mM; end
+        end
+        fprintf(' %14.4g', v);
+    end
+    fprintf('\n');
+end
+end
+
+% =====================================================================
 function R = relax(TR_ms, TE_ms, T1_ms, T2_ms)
 R = (1 - exp(-TR_ms / T1_ms)) * exp(-TE_ms / T2_ms);
 end
@@ -370,6 +396,8 @@ function e = extRefDefaults(e, SessionDir)
 if ~isstruct(e), e = struct(); end
 d = struct( ...
     'enable',           false, ...
+    'anatomy',          'brain', ... % 'brain' | 'calf' -- selects tissue segmentation
+    'applyB1',          false, ...   % B1+ / receive correction DISABLED (QC-reported only)
     'b1Dir',            '', ...      % auto-located under SessionDir\E100 if empty
     'refPpm',           8.0, ...     % external-reference chemical shift (PCr=0)
     'refConc_mM',       500, ...     % known phantom concentration (sodium phosphate)
@@ -380,7 +408,7 @@ d = struct( ...
     'refShiftBoundsHz', [-40 40], ...% ~+-0.33 ppm at 7T, keeps RefExt on the 8 ppm peak
     'refLbBoundsHz',    [0 40], ...  % NARROW phantom line (liquid phantom); envelope -> baseline
     'refLbInitHz',      15, ...
-    'nSlicesCentral',   8, ...       % central B1 slices spanning the excited slab
+    'dropEndSlices',    1, ...       % B1 slab = all slices minus this many at EACH end
     'brainThr',         0.15, ...    % head-mask threshold (fraction of max), used as fallback
     'brainMaskNii',     '', ...      % HD-BET brain mask NIfTI (skull-stripped T1); overrides threshold
     'phantThr',         0.05, ...    % phantom-mask threshold (fraction of max)
@@ -425,12 +453,37 @@ end
 
 % =====================================================================
 function b1 = findB1Dir(SessionDir)
-% Locate the prep_tfl3d_b1map DICOM folder under SessionDir\E100.
+% Locate the B1 map DICOM folder under SessionDir\E* (E100/E200/E300).
+% Returns '' when the session has no B1 scan -- that is NOT an error; the
+% external quant degrades to "RefExt fitted but not quantified" (see
+% extRefQuant31P) and the internal-reference quant is unaffected.
+%
+% Preference order matters: some sessions carry BOTH a 3D 1H TurboFLASH map
+% (PREP_TFL3D_B1MAP_10SLICES, the one we want) and a 3-file 31P MoCo map
+% (PREP_MOCO_B1MAP_31P), and plain alphabetical order picks the wrong one.
 b1 = '';
-cand = dir(fullfile(SessionDir,'E100','*B1MAP*'));
-if isempty(cand), cand = dir(fullfile(SessionDir,'E100','*b1map*')); end
-cand = cand([cand.isdir]);
-if ~isempty(cand)
-    b1 = fullfile(cand(1).folder, cand(1).name);
+exams = dir(fullfile(SessionDir,'E*'));
+exams = exams([exams.isdir]);
+cand  = [];
+for k = 1:numel(exams)
+    c = dir(fullfile(exams(k).folder, exams(k).name, '*B1MAP*'));
+    if ~isempty(c), cand = [cand; c(:)]; end %#ok<AGROW>
 end
+if isempty(cand), return; end
+cand = cand([cand.isdir]);
+if isempty(cand), return; end
+
+names = {cand.name};
+% rank: TFL3D multi-slice > any other TFL > everything else (e.g. MOCO)
+score = zeros(numel(names),1);
+score(contains(names,'TFL','IgnoreCase',true))   = 1;
+score(contains(names,'TFL3D','IgnoreCase',true)) = 2;
+% tie-break by file count (more files = more slices x flip angles)
+nfile = zeros(numel(names),1);
+for k = 1:numel(names)
+    f = dir(fullfile(cand(k).folder, names{k}, '*'));
+    nfile(k) = sum(~[f.isdir]);
+end
+[~, ord] = sortrows([score nfile], [-1 -2]);
+b1 = fullfile(cand(ord(1)).folder, cand(ord(1)).name);
 end
