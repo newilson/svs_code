@@ -497,5 +497,7 @@ output.hz = hz;
 output.ppm = ppm;
 
 
+fclose('all');
+
 rmpath([thisPath filesep 'utils']);
 rmpath([thisPath filesep 'bruker']);

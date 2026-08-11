@@ -70,19 +70,31 @@ pars.dofit         = 'varpro';
 pars.fit.mode      = 5;                 % Voigt
 % Inert while pars.fit.regions is defined (only seeds focusRange, and focus
 % weighting needs focusWeight > 1).  Kept consistent with the region edges.
-pars.fit.ppm_range = [8.7 10.45];
+pars.fit.ppm_range = [8.7 10.6];
 pars.fit.ph_range  = [-60 60];
 pars.peaks.name    = {'NADH2','NADH6','NADH4','Trp'};
 pars.peaks.range   = [9.25 9.45; 9.05 9.25; 8.8 9.05; 10.05 10.15];
 
-% Two independent fit regions -- the NAD+ cluster and the narrow Trp singlet at
-% ~10.1 ppm -- each running its own coarse->phase->fine fit.  
-pars.fit.coarseMode = 'perRegion';
+% Fine-fit linewidth bounds in Hz, PER PEAK (rows follow pars.peaks.name; ppm
+% conversion happens once f0 is read).  Without this the default [10 60] Hz
+% applies to every peak, but Trp is genuinely broader: the coarse HSVD is
+% allowed 120 Hz for it (hsvdCoarse.lwMaxHz below) and routinely returns ~64 Hz
+% -- ABOVE the fine-fit cap -- so Trp's width pinned to its upper bound in most
+% scans, and harder baseline priors only pushed it further onto the bound.
+pars.fit.baselineOpt.widthBoundsHz = [10 60; 10 60; 10 60; 10 120];
+
+% Two fit regions -- the NAD+ cluster and the narrow Trp singlet at ~10.1 ppm.
+% ONE coarse HSVD + ONE phase covers both ('union'): the Trp region holds a
+% single peak, and nadCoarsePhase needs two to fit a first-order phase, so
+% per-region phasing left the Trp region with pc1 = 0 in every session and no
+% phase at all where HSVD failed to seed Trp.  The baseline partition is still
+% done per region inside the union branch.
+pars.fit.coarseMode = 'union';
 pars.fit.regions(1).fitRange = [8.7 10.0];
 pars.fit.regions(1).peaks    = {'NADH2','NADH6','NADH4'};
 pars.fit.regions(1).name     = 'NAD';
 pars.fit.regions(1).baselineOpt.knotSpacing = 0.43;
-pars.fit.regions(2).fitRange = [9.8 10.45];
+pars.fit.regions(2).fitRange = [9.8 10.6];
 pars.fit.regions(2).peaks    = {'Trp'};
 pars.fit.regions(2).name     = 'Trp';
 pars.fit.regions(2).baselineOpt.knotSpacing = 2;
@@ -101,7 +113,7 @@ pars.fit.baselineOpt.TolFun      = 1e-6;
 % HSVD-derived SOFT PRIORS on the fine fit
 %   lambdaPrior: baseline penalty ||w.*(B*beta - hsvdBaseline)||^2. 
 %   lambdaWidth: Voigt total FWHM vs the HSVD linewidth.
-pars.fit.baselineOpt.lambdaPrior = 0.0;
+pars.fit.baselineOpt.lambdaPrior = 0.3;
 pars.fit.baselineOpt.lambdaWidth = 0.3;
 
 % Lineshape kernel DISABLED: it is collinear with the Voigt Gaussian width
@@ -192,7 +204,6 @@ fprintf('Saved -> %s\n', outPath);
 
 % remove path
 rmpath(fullfile(fileparts(mfilename('fullpath')), 'utils'));
-
 end
 
 % =====================================================================

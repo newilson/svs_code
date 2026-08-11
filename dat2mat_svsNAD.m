@@ -789,6 +789,17 @@ if pars.dofit
         if ~ismember(coarseMode, {'perregion','union'})
             error('pars.fit.coarseMode must be ''perRegion'' or ''union''')
         end
+        % 'union' re-partitions ONE HSVD component set per region
+        % (unionCoarseForRegion).  The VARPRO coarse path produces no
+        % components to re-partition, so the combination is unsupported --
+        % fail loudly rather than silently degrade.
+        if strcmp(coarseMode,'union') && isfield(pars.fit,'hsvdCoarse') && ...
+                isfield(pars.fit.hsvdCoarse,'enable') && ...
+                ~isempty(pars.fit.hsvdCoarse.enable) && ~pars.fit.hsvdCoarse.enable
+            error(['coarseMode ''union'' requires hsvdCoarse.enable = true; ' ...
+                   'the VARPRO coarse path has no component set to re-partition. ' ...
+                   'Use coarseMode ''perRegion'' with hsvdCoarse.enable = false.'])
+        end
 
         % resolve each region's peak indices into pars.peaks.name
         regSel = cell(nRegions,1);
@@ -859,9 +870,21 @@ if pars.dofit
                 width0_all(allSelB)  = broadW0;
                 ph0_all(allSelB)     = 0;
             end
+            % One coarse fit and one phase for every region, but the baseline
+            % partition is redone per region: each region's own peaks are the
+            % ones removed, everything else (including components centred
+            % outside the region) stays in that region's baseline.  Also puts
+            % baselinePhased on the region's own grid, which is what the
+            % lambdaPrior hand-off below checks the length of.
             for r = 1:nRegions
                 pcInfo(r).pc0 = pc0;  pcInfo(r).pc1 = pc1;
-                wsP_store{r}  = wsP;  coarseStore{r} = cf;
+                wsP_store{r}  = wsP;
+                selR  = regSel{r};
+                selRC = selR(~isBroad(selR));
+                if isempty(selRC), selRC = selR; end
+                coarseStore{r} = unionCoarseForRegion(cf, ppm, f0, center_freq, ...
+                    regionList(r).fitRange, pars.peaks.range(selRC,:), ...
+                    subsetHsvdOpt(hsvdC, selRC, npks), pc0, pc1);
             end
             fprintf('Phase correction (union): pc0 = %.1f deg, pc1 = %.1f deg\n', pc0, pc1)
         else
@@ -970,6 +993,16 @@ if pars.dofit
             if isstruct(cfR) && isfield(cfR,'baselinePhased') && ...
                     numel(cfR.baselinePhased) == numel(inds_r)
                 baseR.priorBaseline = cfR.baselinePhased;
+            elseif isfield(baseR,'lambdaPrior') && ~isempty(baseR.lambdaPrior) ...
+                    && baseR.lambdaPrior > 0
+                % Do not let a grid mismatch quietly turn the prior off -- the
+                % fit would still run, just with a free baseline, and nothing
+                % downstream would show it.
+                warning('dat2mat_svsNAD:priorGridMismatch', ...
+                    ['region %d (%s): coarse baseline is %d points but the region ' ...
+                     'grid is %d; lambdaPrior=%g will have NO effect here.'], ...
+                    r, regionLabel(regionList, r), numel(cfR.baselinePhased), ...
+                    numel(inds_r), baseR.lambdaPrior);
             end
             % Width prior: the HSVD linewidth seed, but only for peaks HSVD actually found 
             pwR = width0_all(sel);
@@ -1353,6 +1386,98 @@ function o = subsetHsvdOpt(o, sel, npks)
         end
     end
 
+function [assigned, found, sig, phDeg, ctr, wdt] = hsvdAssign( ...
+        ppmC, lwHz, phC, amp, f0, peakRange, lwMin, lwMax, phTol)
+% Assign HSVD components to peaks.  A component qualifies for peak kk when its
+% centre lies in that peak's ppm window AND its linewidth and phase are inside
+% the per-peak caps.  Everything left unassigned is baseline.
+%
+% Note what "unassigned" means: the test is against the PEAK TABLE, not against
+% any region window.  A component sitting inside a region but under no peak is
+% baseline, and so is a component centred far outside -- which is exactly what
+% lets a region's baseline carry the tails of resonances outside it.
+%
+% ctr/wdt/phDeg are only meaningful where found(kk) is true; the caller keeps
+% its own fallback seeds for the rest.
+    np       = size(peakRange, 1);
+    assigned = false(numel(ppmC), 1);
+    found    = false(np, 1);
+    sig      = zeros(np, 1);
+    phDeg    = zeros(np, 1);
+    ctr      = mean(peakRange, 2);
+    wdt      = nan(np, 1);
+    for kk = 1:np
+        sel = ppmC >= min(peakRange(kk,:)) & ppmC <= max(peakRange(kk,:)) & ...
+              lwHz >= lwMin(kk)            & lwHz <= lwMax(kk)            & ...
+              phC  >= -phTol(kk)           & phC  <= phTol(kk);
+        if ~any(sel), continue; end
+        assigned  = assigned | sel;
+        found(kk) = true;
+        A = sum(amp(sel));
+        w = abs(amp(sel));
+        sig(kk)   = abs(A);
+        phDeg(kk) = angle(A) * 180/pi;
+        ctr(kk)   = sum(w .* ppmC(sel)) / sum(w);
+        wdt(kk)   = sum(w .* lwHz(sel)) / sum(w) / f0;
+    end
+
+function Sc = hsvdSpectra(fHz, dHz, amp, N, dt)
+% Full-length spectrum of every HSVD component, one column each.  Evaluating
+% all N points (not just a window) is what allows a component centred outside
+% a region to contribute its tail inside that region.
+    tf = (0:N-1)' * dt;
+    Yc = exp(tf * (-dHz(:).' + 1i*2*pi*fHz(:).')) .* amp(:).';
+    Sc = fftshift(fft(Yc, [], 1), 1);
+
+function cf = hsvdPartition(Sc, assigned, inds, ppm, center_freq, pc0, pc1)
+% Split a component set into peaks (.fit) and baseline (.baseline) over the
+% points inds, unphased and phased by [pc0 pc1].  The phased baseline is the
+% one to hand the fine fit as a prior: it is in the same phase frame as the
+% data the fine fit will see.
+    cf.fit      = real(sum(Sc(inds,  assigned), 2));
+    cf.baseline = real(sum(Sc(inds, ~assigned), 2));
+    phvec = exp(-1i*pi/180*(pc0 + 2*pc1/abs(ppm(end)-ppm(1)) * (ppm(:)-center_freq)));
+    cf.baselinePhased = real(sum(Sc(inds, ~assigned) .* phvec(inds), 2));
+    cf.fitPhased      = real(sum(Sc(inds,  assigned) .* phvec(inds), 2));
+
+function cfR = unionCoarseForRegion(cf, ppm, f0, center_freq, fitRange, ...
+                                    peakRange, hsvdOpt, pc0, pc1)
+% Re-partition the ONE global HSVD component set for a single region.
+%
+% coarseMode 'union' runs a single coarse fit so that both regions share one
+% phase.  The baseline, though, must stay region-specific: the components to
+% subtract are the ones THIS region models, so for the Trp region the NAD
+% components stay in the baseline where they belong.  Assigning against the
+% union peak table instead would strip the NAD shoulder out of the Trp
+% baseline while region 2's model has no NAD peaks to put it back.
+%
+% No HSVD is re-run -- fHz/dHz/amp come straight off the stored struct.
+    h  = cf.hsvd;
+    np = size(peakRange, 1);
+    lwMin = optVec(hsvdOpt,'lwMinHz',      10,  np);
+    lwMax = optVec(hsvdOpt,'lwMaxHz',      90,  np);
+    phTol = optVec(hsvdOpt,'phaseTolDeg', 180,  np);
+
+    assignedR = hsvdAssign(h.ppm, h.lwHz, h.phaseDeg, h.amp, f0, ...
+                           peakRange, lwMin, lwMax, phTol);
+
+    inds = find(ppm > min(fitRange) & ppm < max(fitRange));
+    Sc   = hsvdSpectra(h.fHz, h.dHz, h.amp, h.N, h.dt);
+    cfR  = hsvdPartition(Sc, assignedR, inds, ppm, center_freq, pc0, pc1);
+
+    cfR.pars        = [];
+    cfR.phResidDeg  = cf.phResidDeg;      % phase is global, so this is too
+    cfR.hsvd        = h;
+    cfR.hsvd.assigned = assignedR;        % but the partition is this region's
+
+function v = optVec(o, fld, dflt, n)
+% Per-peak option vector, accepting a scalar, a length-n vector, or nothing.
+    v = dflt;
+    if isstruct(o) && isfield(o, fld) && ~isempty(o.(fld)), v = o.(fld); end
+    v = v(:);
+    if isscalar(v), v = v * ones(n,1); end
+    assert(numel(v) == n, '%s must be scalar or length %d', fld, n);
+
 function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
         ws, ppm, f0, center_freq, fitRange, peakRange, mode, baselineOpt, minw, plt, label, widthInit, hsvdOpt)
 % Coarse HSVD decomposition + phase correction derived from this region's peaks.
@@ -1361,7 +1486,11 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
 % coarse fit struct (.fit = assigned components, .baseline = unassigned).
 %
 % hsvdOpt fields (all optional):
-%   .enable      true (set false to fall back to the VARPRO block below)
+%   .enable      true.  false selects the previous coarse estimator, a VARPRO
+%                Voigt fit of the region (local function coarseVarpro).  That
+%                path supplies no component decomposition, so it cannot feed
+%                baselineOpt.lambdaPrior and cannot be combined with
+%                coarseMode 'union'.
 %   .K           60    HSVD order              (SpecTickle opt.hsvd_order)
 %   .npts        1024  FID points decomposed   (SpecTickle opt.hsvd_np)
 %   .lwMinHz     10    scalar or per-peak      (peaktable linewidth_min)
@@ -1398,6 +1527,17 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
         width0(m) = wi(m);
     end
 
+    % hsvdOpt.enable=false selects the PREVIOUS coarse estimator: a VARPRO
+    % Voigt fit over the region (see coarseVarpro).  Until 2026-08 this flag
+    % was parsed but never tested, and the VARPRO code it named was commented
+    % out, so setting it false silently changed nothing.
+    if ~hsvdOpt.enable
+        [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = coarseVarpro( ...
+            ws, x, y, ppm, center_freq, peakRange, mode, baselineOpt, minw, ...
+            plt, label, center0, width0);
+        return
+    end
+
     % ---- HSVD on the FID underlying this spectrum -----------------------
     N   = numel(ppm);
     bw  = N * f0 * abs(ppm(2) - ppm(1));   % Hz; ppm step = bw/(N*f0)
@@ -1413,24 +1553,11 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
     phC  = angle(amp(:)) * 180/pi;       % component phase, deg
 
     % ---- assign components to peaks ---------------
-    nC       = numel(ppmC);
-    assigned = false(nC, 1);
-    found    = false(np, 1);
-    sig      = zeros(np, 1);
-    for kk = 1:np
-        sel = ppmC >= min(peakRange(kk,:)) & ppmC <= max(peakRange(kk,:)) & ...
-              lwHz >= lwMin(kk)            & lwHz <= lwMax(kk)            & ...
-              phC  >= -phTol(kk)           & phC  <= phTol(kk);
-        if ~any(sel), continue; end
-        assigned = assigned | sel;
-        found(kk) = true;
-        A  = sum(amp(sel));                    
-        w  = abs(amp(sel));
-        sig(kk)     = abs(A);
-        ph0(kk)     = angle(A) * 180/pi;
-        center0(kk) = sum(w .* ppmC(sel)) / sum(w);
-        width0(kk)  = sum(w .* lwHz(sel)) / sum(w) / f0;
-    end
+    [assigned, found, sig, phA, ctrA, wdtA] = hsvdAssign(ppmC, lwHz, phC, amp, ...
+                                                 f0, peakRange, lwMin, lwMax, phTol);
+    ph0(found)     = phA(found);
+    center0(found) = ctrA(found);
+    width0(found)  = wdtA(found);
     if ~any(found)
         warning('nadCoarsePhase:noHSVDpeaks', ...
             '%s: HSVD found no qualifying components; phase left uncorrected.', label);
@@ -1459,19 +1586,15 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
 
     % ---- synthesize a coarseFit struct from the components --------------
     % .fit = peak-assigned components, .baseline = everything else
-    tf  = (0:N-1)' * dt;
-    Yc  = exp(tf * (-dHz(:).' + 1i*2*pi*fHz(:).')) .* amp(:).';
-    Sc  = fftshift(fft(Yc, [], 1), 1);
-    coarseFit.fit      = real(sum(Sc(inds,  assigned), 2));
-    coarseFit.baseline = real(sum(Sc(inds, ~assigned), 2));
-    % Same partition, but rotated by the phase correction this region is about
-    % to apply; THIS is the one to use as a baseline prior.
-    phvec = exp(-1i*pi/180*(pc0 + 2*pc1/abs(ppm(end)-ppm(1)) * (ppm(:)-center_freq)));
-    coarseFit.baselinePhased = real(sum(Sc(inds, ~assigned) .* phvec(inds), 2));
-    coarseFit.fitPhased      = real(sum(Sc(inds,  assigned) .* phvec(inds), 2));
+    Sc        = hsvdSpectra(fHz, dHz, amp, N, dt);
+    coarseFit = hsvdPartition(Sc, assigned, inds, ppm, center_freq, pc0, pc1);
     coarseFit.pars     = [];
+    % fHz/dHz/dt/N are kept so a caller holding this struct can re-partition
+    % the SAME components for another window without re-running the HSVD
+    % (see unionCoarseForRegion).
     coarseFit.hsvd     = struct('ppm',ppmC, 'lwHz',lwHz, 'phaseDeg',phC, ...
-                                'amp',amp(:), 'assigned',assigned, ...
+                                'amp',amp(:), 'fHz',fHz(:), 'dHz',dHz(:), ...
+                                'dt',dt, 'N',N, 'assigned',assigned, ...
                                 'found',found, 'signal',sig, ...
                                 'polyCoef',p, 'K',numel(ppmC));
     % residual per-peak phase AFTER correction -- should sit near 0
@@ -1490,71 +1613,87 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
         title(sprintf('Coarse HSVD: %s', label))
     end
 
-% ----------------------------------------------------------------------
-% PREVIOUS coarse VARPRO implementation (it consumes mode,
-% baselineOpt and minw, which the HSVD path ignores).
-% ----------------------------------------------------------------------
-%     center0 = mean(peakRange, 2);
-%     width0  = (30/f0) * ones(np, 1);
-%     if nargin >= 12 && ~isempty(widthInit)
-%         wi = widthInit(:);
-%         assert(numel(wi) == np, 'widthInit length must match peakRange rows (%d)', np);
-%         m = wi > 0 & ~isnan(wi);
-%         width0(m) = wi(m);
-%     end
+function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = coarseVarpro( ...
+        ws, x, y, ppm, center_freq, peakRange, mode, baselineOpt, minw, ...
+        plt, label, center0, width0)
+% Coarse estimator used before 041082f (2026-07-23): a loose VARPRO fit of the
+% region with the SAME lineshape model as the fine fit, from which the seeds
+% and the linear phase are read off.  Selected by hsvdCoarse.enable = false.
 %
-%     bo = baselineOpt;
-%     bo.centerBounds = peakRange;
-%     bo.TolFun = 1e-3;
-%     bo.TolX   = 1e-3;
-%     aub = zeros(np, 1);
-%     for kk = 1:np
-%         rng = peakRange(kk,:);
-%         li = x > min(rng) & x < max(rng);
-%         if any(li)
-%             aub(kk) = max(abs(real(y(li))));
-%         else
-%             aub(kk) = max(abs(real(y)));
-%         end
-%     end
-%     bo.amplUB = aub;
+% Differs from the HSVD path in what it can and cannot supply: there is no
+% component decomposition, so coarseFit carries no .hsvd and no
+% .baselinePhased.  Callers must therefore treat both as optional --
+% baselineOpt.lambdaPrior has no prior to work with here, and coarseMode
+% 'union' cannot re-partition per region (dat2mat_svsNAD errors on that
+% combination rather than silently dropping the prior).
 %
-%     coarseFit = curvefitAuto_varproBaseline(x, y, mode, ones(np,1), center0, width0, ...
-%         [-179 179], minw, bo);
-%
-%     center0 = coarseFit.pars(np + (1:np))';
-%     if mode == 5 || mode == 7
-%         ph0    = coarseFit.pars(3*np + (1:np))';
-%         width0 = coarseFit.pars(5*np + (1:np))';   % total Voigt width
-%     elseif mode == 3 || mode == 4
-%         ph0    = coarseFit.pars(3*np + (1:np))';
-%         width0 = coarseFit.pars(2*np + (1:np))';
-%     else
-%         ph0    = zeros(np, 1);
-%         width0 = coarseFit.pars(2*np + (1:np))';
-%     end
-%
-%     % linear phase (pc0 + pc1) through this region's peaks
-%     if np == 1
-%         pc0 = ph0;
-%         pc1 = 0;
-%     else
-%         p   = polyfit(center0(:), ph0(:), 1);
-%         pc0 = polyval(p, center_freq);             % 0th order at pivot
-%         % shiftSpectrumPhase convention: pc1 is total 1st-order phase
-%         % across half the bandwidth
-%         pc1 = p(1) * abs(ppm(end) - ppm(1)) / 2;
-%     end
-%     wsP = shiftSpectrumPhase(ws, [pc0 pc1], ppm, center_freq);
-%
-%     if plt
-%         figure('Name', sprintf('1H coarse fit - %s', label))
-%         plot(x, y, 'k', x, coarseFit.fit, 'r', x, y - coarseFit.fit, 'g')
-%         hold on, plot(x, coarseFit.baseline, 'b--')
-%         legend({'data','coarse fit','residual','baseline'})
-%         set(gca,'xdir','reverse')
-%         title(sprintf('Coarse VARPRO fit: %s', label))
-%     end
+% center0/width0 arrive pre-seeded with the caller's fallbacks so the two
+% paths start from the same place.
+    np = size(peakRange, 1);
+
+    bo = baselineOpt;
+    bo.centerBounds = peakRange;
+    bo.TolFun = 1e-3;
+    bo.TolX   = 1e-3;
+    aub = zeros(np, 1);
+    for kk = 1:np
+        rng = peakRange(kk,:);
+        li  = x > min(rng) & x < max(rng);
+        if any(li)
+            aub(kk) = max(abs(real(y(li))));
+        else
+            aub(kk) = max(abs(real(y)));
+        end
+    end
+    bo.amplUB = aub;
+
+    coarseFit = curvefitAuto_varproBaseline(x, y, mode, ones(np,1), center0, width0, ...
+        [-179 179], minw, bo);
+
+    center0 = coarseFit.pars(np + (1:np))';
+    if mode == 5 || mode == 7
+        ph0    = coarseFit.pars(3*np + (1:np))';
+        width0 = coarseFit.pars(5*np + (1:np))';   % total Voigt width
+    elseif mode == 3 || mode == 4
+        ph0    = coarseFit.pars(3*np + (1:np))';
+        width0 = coarseFit.pars(2*np + (1:np))';
+    else
+        ph0    = zeros(np, 1);
+        width0 = coarseFit.pars(2*np + (1:np))';
+    end
+
+    % linear phase (pc0 + pc1) through this region's peaks
+    if np == 1
+        pc0 = ph0;
+        pc1 = 0;
+    else
+        p   = polyfit(center0(:), ph0(:), 1);
+        pc0 = polyval(p, center_freq);             % 0th order at pivot
+        % shiftSpectrumPhase convention: pc1 is total 1st-order phase
+        % across half the bandwidth
+        pc1 = p(1) * abs(ppm(end) - ppm(1)) / 2;
+    end
+    % NEGATED, unlike the HSVD path.  ph0 here is the phase parameter of the
+    % Voigt model itself, and that model applies conj(Vc) (see
+    % compositeV_complex_unit): its phase runs opposite to shiftSpectrumPhase.
+    % Applying +pc0 would ADD the measured phase instead of removing it,
+    % roughly doubling the error -- which is exactly what happened between
+    % 1a4640b and 041082f, when this estimator was live alongside the conj.
+    % The HSVD path is unaffected: it reads phase from component amplitudes,
+    % which already run in shiftSpectrumPhase's direction.
+    wsP = shiftSpectrumPhase(ws, [-pc0 -pc1], ppm, center_freq);
+
+    fprintf('  %s: coarse VARPRO; pc0 = %.1f deg, pc1 = %.1f deg (applied negated)\n', ...
+            label, pc0, pc1);
+
+    if plt
+        figure('Name', sprintf('1H coarse fit - %s', label))
+        plot(x, y, 'k', x, coarseFit.fit, 'r', x, y - coarseFit.fit, 'g')
+        hold on, plot(x, coarseFit.baseline, 'b--')
+        legend({'data','coarse fit','residual','baseline'})
+        set(gca,'xdir','reverse')
+        title(sprintf('Coarse VARPRO fit: %s', label))
+    end
 
 function out = nadFineFit(x, y, center0, width0, peakRange, baselineOpt, ...
         focusRange, focusWeight, mode, ph_range, minw, lineShapeOpt)

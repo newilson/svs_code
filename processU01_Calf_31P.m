@@ -17,10 +17,11 @@ function processU01_Calf_31P(SessionDir, FinalOutDir, plt, extRef)
 % Calf is a single muscle compartment, so (unlike the brain pipeline) there
 % is no anatomic segmentation and no (1 - f_CSF) partial-volume term.
 %
-% [PCr] reference: 33 mM is the standard whole-muscle (wet-weight) value for
-% skeletal-muscle 31P MRS (Kemp; Meyerspeer et al. consensus, NMR Biomed
-% 2020).  To report per litre of intracellular water instead, use ~42.5 mM
-% ( = 33 / 0.77 ) -- edit refConc_mM below.
+% Internal reference: aATP at 8.2 mM whole-muscle, matching the brain
+% pipeline's reference species.  PCr is reported alongside at 33 mM, the
+% standard whole-muscle (wet-weight) value for skeletal-muscle 31P MRS (Kemp;
+% Meyerspeer et al. consensus, NMR Biomed 2020).  To report per litre of
+% intracellular water instead, divide by 0.77 -- edit the conc below.
 %
 % OPTIONAL external-reference (phantom) quant, mirroring processU01_Brain_31P:
 % pass extRef.enable=true to add the ~8 ppm phantom singlet 'RefExt' to the
@@ -163,6 +164,12 @@ metProps = struct( ...
                10,  10, ...
                10,  10,  10,  10, ...
               50}, ...
+    ... nPhos here is DELIBERATELY 1 for every species, including the NAD and
+    ... UDP pyrophosphates (2 P each).  The spin count is already divided out
+    ... upstream: dat2mat_svs31p computes amplScaled = ampl ./ n from
+    ... basisInfo.n (2 for NADH/NADplus/UDP*), and the drivers pass amplScaled
+    ... as fitAreas.  Setting 2 here would apply the same correction twice and
+    ... halve NAD+/NADH a second time.
     'nPhos', {1,1,1,1,1,1,1,1,  1,1,1,1,  1,1,  1,1,1,1,  1});
 
 % External-reference relaxation/nuclei properties (placeholders; edit when
@@ -181,19 +188,21 @@ end
 % rescales all concentrations by one common factor and never alters a ratio
 % between metabolites within a scan -- the three sets exist to show how much
 % the absolute scale depends on which reference you believe.
-%   PRIMARY (the one written to absQ.metabolites) is PCr for calf.
+%   PRIMARY (the one written to absQ.metabolites) is aATP for calf, matching
+%   the brain pipeline so the two anatomies share a reference species.
 % =====================================================================
-refName    = 'PCr';        % primary reference for calf
-refConc_mM = 33;           % [PCr] muscle, whole-muscle wet weight (placeholder)
+% [aATP]_muscle PLACEHOLDER -- whole-muscle ATP is conventionally 8.2 mM
+% (Kemp; Meyerspeer et al. consensus, NMR Biomed 2020), i.e. PCr/ATP ~ 4.
+% EDIT BEFORE PUBLICATION USE, exactly like the T1/T2 table above.
+refName    = 'aATP';       % primary reference for calf
+refConc_mM = 8.2;          % [aATP] muscle, whole-muscle wet weight (placeholder)
 refIdx     = find(strcmp({metProps.name}, refName), 1);
 assert(~isempty(refIdx), 'Reference %s missing from metProps', refName);
 
 % Secondary internal reference, reported alongside.
-% [aATP]_muscle PLACEHOLDER -- whole-muscle ATP is conventionally 8.2 mM
-% (Kemp; Meyerspeer et al. consensus, NMR Biomed 2020), i.e. PCr/ATP ~ 4.
-% EDIT BEFORE PUBLICATION USE, exactly like the T1/T2 table above.
-altRefName    = 'aATP';
-altRefConc_mM = 8.2;
+% 33 mM is the standard whole-muscle (wet-weight) [PCr] value.
+altRefName    = 'PCr';
+altRefConc_mM = 33;
 
 % =====================================================================
 % Process / fit
@@ -237,7 +246,7 @@ absQ.byRef.(refName)    = refQuant31P(refName,    refConc_mM, ...
 absQ.byRef.(altRefName) = refQuant31P(altRefName, altRefConc_mM, ...
                                       fitNames, fitAreas, metProps, TR_ms, TE_ms);
 
-% Primary reference (PCr for calf) stays in absQ.reference/absQ.metabolites
+% Primary reference (aATP for calf) stays in absQ.reference/absQ.metabolites
 % so every existing consumer of this .mat keeps working unchanged.
 absQ.reference   = absQ.byRef.(refName).reference;
 absQ.metabolites = absQ.byRef.(refName).metabolites;

@@ -100,6 +100,41 @@ pars.peaks.range   = [9.50 9.70; 9.22 9.48; 9.00 9.22; 9.90 10.20];
 % (bru2mat_svsNAD asserts this).
 pars.peaks.widthInit = [NaN; NaN; NaN; 0.10];
 
+% ---------------------------------------------------------------------
+% Coarse fit: HSVD decomposition (same method as the Siemens brain/calf path
+% in dat2mat_svsNAD).  Components landing inside a peak's range that pass the
+% linewidth and phase filters seed that peak's centre/width/phase; everything
+% else is treated as baseline.  Set .enable = false to fall back to the legacy
+% coarse VARPRO fit.
+%
+% The linewidth bounds are in Hz and are SPECIFIC TO THIS EXPERIMENT (Bruker
+% 14.1 T, f0 = 600.13 MHz, selgpse_cwl).  They are NOT field-scaled -- a new
+% experiment gets its own bounds, measured the same way: run once, dump
+% output.met.fit.region(r).coarse.hsvd, and read off the linewidths of the
+% components that land in each peak's range.  Measured across the six rbnmr
+% use-this datasets (phase-qualifying components only):
+%     NADH2  34.3 - 64.6 Hz   (one 190 Hz outlier in Blood_5 = background,
+%                              deliberately excluded by the 90 Hz ceiling)
+%     NADH6  27.8 - 61.0 Hz
+%     Trp    65.9 - 118.7 Hz  (one 22.9 Hz sliver in Blood_6, amplitude 6 vs
+%                              100 for the real peak, excluded by the floor)
+% Bounds below take those ranges with margin.  Broad9_4 is excluded from the
+% coarse phase fit entirely (the 'Broad' prefix), so its row is unused and is
+% only present to keep the vectors aligned with pars.peaks.name.
+%
+% phaseTolDeg = 60: at the 180 default nothing is ever rejected on phase, so
+% two near-opposed components in one peak range get averaged into a single
+% seed and partially cancel (Blood_11: +88 and -54 deg both landing on Trp).
+% zeroOrderOnly = true: see _blood_opt/coarse_phase_notes.md.
+pars.fit.hsvdCoarse.enable        = true;
+pars.fit.hsvdCoarse.K             = 60;
+pars.fit.hsvdCoarse.npts          = 1024;
+%                                Broad9_4  NADH2  NADH6   Trp
+pars.fit.hsvdCoarse.lwMinHz       = [   40;    20;    20;    40];
+pars.fit.hsvdCoarse.lwMaxHz       = [  300;    90;    90;   150];
+pars.fit.hsvdCoarse.phaseTolDeg   = 60;
+pars.fit.hsvdCoarse.zeroOrderOnly = true;
+
 % DATA-DRIVEN per-dataset re-seeding of the NAD/Trp center ranges.  The
 % downfield referencing drifts ~0.15 ppm between sessions; that drift parks a
 % NAD component in a valley and the >=0 amplitude solve in the fitter then
@@ -218,11 +253,18 @@ pars.watfit.lineShapeOpt.areaPadFactor = 100;
 
 % =====================================================================
 % Single blood compartment: water content + relaxation.
-% PLACEHOLDER values for whole blood (high-field). EDIT BEFORE PUBLICATION.
 %   waterConc_M : whole blood is ~83% water by mass -> ~0.83 * 55.5 M ~= 46 M
-%   T1/T2       : blood water at high field (rough literature placeholders)
+%                 (0.8*55 = 44 M used below; still a rough placeholder)
+%   T2_ms       : MEASURED on the water arm of the blood relaxometry series
+%                 (_t2relax, selective spin-echo, TE 20-82 ms): 29.3 +/- 3.4 ms,
+%                 R^2 = 0.996.  Unaffected by the TE=10 ms question that set the
+%                 metabolite T2 above -- the water series has no 10 ms scan.
+%   T1_ms       : still a PLACEHOLDER (rough literature value) and the dominant
+%                 systematic on every absolute concentration here: conc scales
+%                 with (1-exp(-TR/T1_water)), which is ~0.18 at TR = 500 ms.
+%                 EDIT BEFORE PUBLICATION.
 % =====================================================================
-Blood = struct('name','Blood', 'T1_ms', 2500, 'T2_ms', 29.2, ...
+Blood = struct('name','Blood', 'T1_ms', 2500, 'T2_ms', 29.3, ...
                'waterConc_M', 0.8 * 55, 'flag_metSig',true);
 
 % Downfield-proton relaxation / proton counts.  Placeholders for now (same
@@ -234,7 +276,16 @@ Blood = struct('name','Blood', 'T1_ms', 2500, 'T2_ms', 29.2, ...
 % the quant loop indexes output.met.fit.areasConv positionally and areasConv
 % is returned in pars.peaks.name order (an assert below enforces this).
 met_T1_ms = [300, 300, 300, 300];   % Broad9_4, NADH2, NADH6, Trp
-met_T2_ms = [ 48.3,  40.1,  51.4,  18.0];   % Broad9_4, NADH2, NADH6, Trp (ms; T2 from relaxometry)
+% T2 (ms) measured on the blood relaxometry series (_t2relax\run_t2relax_narrow
+% -> refit_t2_dropTE10), narrow [8.9 10.3] fit, TE = 20..82 ms.  The TE=10 ms
+% point is EXCLUDED: that scan carries extra broad short-T2 background (gone by
+% TE=20) which the fixed-lineshape model has no component for, so the
+% amplitude-only solve dumps it into the broadest peak and starves NADH6 --
+% biasing NADH6 long (53 ms) and NADH4 short (20 ms).  With it dropped the four
+% window/reference-scan variants agree to 1-4% and both R^2 and CI improve.
+% Broad9_4 is a fitting-only shoulder that is never quantified -> its T2 is
+% irrelevant; 30 ms is an arbitrary placeholder.
+met_T2_ms = [ 30.0,  40.6,  35.8,  18.9];   % Broad9_4 (placeholder), NADH2, NADH6, Trp
 met_nProt = [   1,    1,    1,    1];
 peakNames = {'Broad9_4','NADH2','NADH6','Trp'};
 nPeaks    = numel(peakNames);

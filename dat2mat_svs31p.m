@@ -669,5 +669,7 @@ output.hz = hz;
 output.ppm = ppm;
 
 
+fclose('all');
+
 rmpath([thisPath filesep 'mapVBVD']);
 rmpath([thisPath filesep 'utils']);
