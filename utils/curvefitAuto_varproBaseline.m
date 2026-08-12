@@ -33,7 +33,9 @@ function output = curvefitAuto_varproBaseline(x,y,mode,amp0,center0,width0,ph_ra
 %                .weights     = weight vector [np x 1] for weighted
 %                               least squares (default ones = uniform)
 %                .widthBounds = [min max] linewidth bounds in x-units
-%                               (scalar row or [n x 2] per-peak)
+%                               (scalar row or [n x 2] per-peak).  For the
+%                               Voigt modes (5, 7) this bounds the TOTAL
+%                               width; the Lorentzian/Gaussian split is free.
 %                .priorBaseline / .lambdaPrior = soft prior pulling the spline
 %                               toward a supplied baseline estimate
 %                .priorWidth  / .lambdaWidth  = soft prior pulling each peak's
@@ -202,16 +204,17 @@ if mode==5 % complex Voigt
         widthmax = 2*width;
     end
 
-    widthL = 0.4 * width;
-
-    term = (width - Acoef*widthL).^2 - Bcoef*(widthL.^2);
-    widthG = sqrt(max(0, term));
+    % nonlinear vector is [pos, wV, ph, eta]: total Voigt FWHM and Gaussian
+    % fraction eta = wG/wV in [0,1].  widthBounds therefore bound the TOTAL
+    % width, and both pure limits (eta 0 = Lorentzian, 1 = Gaussian) are
+    % reachable.  Initial eta reproduces the previous widthL = 0.4*width seed.
+    etaInit = resolveEtaInit(baselineOpt, width, n, Acoef, Bcoef);
 
     pars(1:n) = center;
     lb(1:n) = centermin;
     ub(1:n) = centermax;
 
-    pars(n + (1:n)) = widthL;
+    pars(n + (1:n)) = width;
     lb(n + (1:n)) = widthmin;
     ub(n + (1:n)) = widthmax;
 
@@ -225,9 +228,9 @@ if mode==5 % complex Voigt
         ub(2*n + (1:n)) = max(ph_range);
     end
 
-    pars(3*n + (1:n)) = widthG;
-    lb(3*n + (1:n)) = widthmin;
-    ub(3*n + (1:n)) = widthmax;
+    pars(3*n + (1:n)) = etaInit;
+    lb(3*n + (1:n)) = 0;
+    ub(3*n + (1:n)) = 1;
 
 elseif mode==7 % magnitude Voigt
 
@@ -239,22 +242,20 @@ elseif mode==7 % magnitude Voigt
         widthmax = 2*width;
     end
 
-    widthL = 0.4 * width;
-
-    term = (width - Acoef*widthL).^2 - Bcoef*(widthL.^2);
-    widthG = sqrt(max(0, term));
+    % nonlinear vector is [pos, wV, eta] -- see mode 5 above
+    etaInit = resolveEtaInit(baselineOpt, width, n, Acoef, Bcoef);
 
     pars(1:n) = center;
     lb(1:n) = centermin;
     ub(1:n) = centermax;
 
-    pars(n + (1:n)) = widthL;
+    pars(n + (1:n)) = width;
     lb(n + (1:n)) = widthmin;
     ub(n + (1:n)) = widthmax;
 
-    pars(2*n + (1:n)) = widthG;
-    lb(2*n + (1:n)) = widthmin;
-    ub(2*n + (1:n)) = widthmax;
+    pars(2*n + (1:n)) = etaInit;
+    lb(2*n + (1:n)) = 0;
+    ub(2*n + (1:n)) = 1;
 
 else
     if hasWidthBounds
@@ -408,14 +409,14 @@ elseif mode==5 % complex Voigt
     Apeak = voigt_complex_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
-    widthL = abs(ip_nonlin((1:n)+n));
+    width = abs(ip_nonlin((1:n)+n));
     phase = ip_nonlin((1:n)+2*n);
-    widthG = abs(ip_nonlin((1:n)+3*n));
-    width = Acoef * widthL + sqrt(Bcoef*widthL.^2 + widthG.^2);
+    [widthL, widthG] = voigtVE2LG(width, ip_nonlin((1:n)+3*n), Acoef, Bcoef);
     ip = [ampl(:).' pos widthL phase widthG width];
     areas = ampl(:).' .* width;
-    lbout = [amin centermin widthmin lb(2*n+(1:n)) widthmin zeros(1,n)];
-    ubout = [amplUB(:).' centermax widthmax ub(2*n+(1:n)) widthmax inf(1,n)];
+    % widthL/widthG are derived, so only the total carries the real bounds
+    lbout = [amin centermin zeros(1,n) lb(2*n+(1:n)) zeros(1,n) widthmin];
+    ubout = [amplUB(:).' centermax widthmax ub(2*n+(1:n)) widthmax widthmax];
 
 elseif mode==6 % magnitude Lorentzian
 
@@ -437,13 +438,13 @@ elseif mode==7 % magnitude Voigt
     Apeak = voigt_magnitude_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
-    widthL = abs(ip_nonlin((1:n)+n));
-    widthG = abs(ip_nonlin((1:n)+2*n));
-    width = Acoef * widthL + sqrt(Bcoef*widthL.^2 + widthG.^2);
+    width = abs(ip_nonlin((1:n)+n));
+    [widthL, widthG] = voigtVE2LG(width, ip_nonlin((1:n)+2*n), Acoef, Bcoef);
     ip = [ampl(:).' pos widthL widthG width];
     areas = ampl(:).' .* width;
-    lbout = [amin centermin widthmin widthmin zeros(1,n)];
-    ubout = [amplUB(:).' centermax widthmax widthmax inf(1,n)];
+    % widthL/widthG are derived, so only the total carries the real bounds
+    lbout = [amin centermin zeros(1,n) zeros(1,n) widthmin];
+    ubout = [amplUB(:).' centermax widthmax widthmax widthmax];
 
 end
 
@@ -471,9 +472,9 @@ switch mode
     case 2, basisFn = @lorentzian_basis;          wRefAll = abs(ip_nonlin((1:n)+n));
     case 3, basisFn = @lorentzian_complex_basis;  wRefAll = abs(ip_nonlin((1:n)+n));
     case 4, basisFn = @gaussian_complex_basis;    wRefAll = abs(ip_nonlin((1:n)+n));
-    case 5, basisFn = @voigt_complex_basis;       wRefAll = Acoef*abs(ip_nonlin((1:n)+n)) + abs(ip_nonlin((1:n)+3*n));
+    case 5, basisFn = @voigt_complex_basis;       wRefAll = abs(ip_nonlin((1:n)+n));
     case 6, basisFn = @lorentzian_magnitude_basis;wRefAll = abs(ip_nonlin((1:n)+n));
-    case 7, basisFn = @voigt_magnitude_basis;     wRefAll = Acoef*abs(ip_nonlin((1:n)+n)) + abs(ip_nonlin((1:n)+2*n));
+    case 7, basisFn = @voigt_magnitude_basis;     wRefAll = abs(ip_nonlin((1:n)+n));
     otherwise, basisFn = []; wRefAll = abs(width(:));
 end
 ip_area = ip_nonlin;
@@ -517,14 +518,9 @@ function rw = widthPriorResidual(ip)
     pw = baselineOpt.priorWidth(:);
     if numel(pw) ~= n, return; end
     switch mode
-        case 5       % complex Voigt:   [center, widthL, ph, widthG]
-            wL = abs(ip(n   + (1:n)));
-            wG = abs(ip(3*n + (1:n)));
-            wt = Acoef*wL(:) + sqrt(Bcoef*wL(:).^2 + wG(:).^2);
-        case 7       % magnitude Voigt: [center, widthL, widthG] -- no phase block
-            wL = abs(ip(n   + (1:n)));
-            wG = abs(ip(2*n + (1:n)));
-            wt = Acoef*wL(:) + sqrt(Bcoef*wL(:).^2 + wG(:).^2);
+        case {5,7}   % Voigt: the total width is parameter block 2 directly
+            wt = abs(ip(n + (1:n)));
+            wt = wt(:);
         case {1,2,3,4,6}   % single width parameter, which IS the total FWHM
             w1 = abs(ip(n + (1:n)));
             wt = w1(:);
@@ -694,9 +690,8 @@ end
 function Apeak = voigt_complex_basis(ip,x)
     Apeak = zeros(length(x), n);
     pos = ip(1:n);
-    widthL = abs(ip((1:n)+n));
     phase = ip((1:n)+2*n);
-    widthG = abs(ip((1:n)+3*n));
+    [widthL, widthG] = voigtVE2LG(abs(ip((1:n)+n)), ip((1:n)+3*n), Acoef, Bcoef);
     for k = 1:n
         temppars = [1 pos(k) widthL(k) phase(k) widthG(k)];
         Apeak(:,k) = compositeV_complex_unit(temppars, x);
@@ -718,8 +713,7 @@ end
 function Apeak = voigt_magnitude_basis(ip,x)
     Apeak = zeros(length(x), n);
     pos = ip(1:n);
-    widthL = abs(ip((1:n)+n));
-    widthG = abs(ip((1:n)+2*n));
+    [widthL, widthG] = voigtVE2LG(abs(ip((1:n)+n)), ip((1:n)+2*n), Acoef, Bcoef);
     for k = 1:n
         temppars = [1 pos(k) widthL(k) widthG(k)];
         Apeak(:,k) = compositeV_magnitude_unit(temppars, x);
@@ -807,6 +801,32 @@ function yfit = compositeG_complex_unit(ip, x)
     yfit = real(G * exp(-1i*ph));
 end
 
+function etaInit = resolveEtaInit(baselineOpt, width, n, Acoef, Bcoef)
+% Starting Gaussian fraction per peak.  baselineOpt.etaInit (scalar or length n)
+% overrides; otherwise reproduce the historical widthL = 0.4*width seed.
+    if isfield(baselineOpt,'etaInit') && ~isempty(baselineOpt.etaInit)
+        e = baselineOpt.etaInit(:).';
+        if isscalar(e), e = e * ones(1,n); end
+        assert(numel(e) == n, 'baselineOpt.etaInit must be scalar or length %d', n);
+        etaInit = min(max(e, 0), 1);
+        return
+    end
+    widthL0 = 0.4 * width;
+    widthG0 = sqrt(max(0, (width - Acoef*widthL0).^2 - Bcoef*(widthL0.^2)));
+    etaInit = widthG0 ./ max(width, eps);
+end
+
+function [wL, wG] = voigtVE2LG(wV, eta, Acoef, Bcoef)
+% (total Voigt FWHM, Gaussian fraction) -> (Lorentzian, Gaussian) widths.
+% eta = wG/wV in [0,1]; 0 = pure Lorentzian, 1 = pure Gaussian.
+% Inverts wV = Acoef*wL + sqrt(Bcoef*wL^2 + wG^2); the (1-eta^2)/(A+s) form
+% avoids the cancellation in the algebraically equivalent (A-s)/(A^2-B).
+    eta = min(max(eta, 0), 1);
+    s   = sqrt(max(0, Acoef^2 - (Acoef^2 - Bcoef)*(1 - eta.^2)));
+    wL  = wV .* (1 - eta.^2) ./ (Acoef + s);
+    wG  = eta .* wV;
+end
+
 function yfit = compositeV_complex_unit(ip, x)
     p   = ip(2);
     wL  = abs(ip(3));
@@ -819,8 +839,8 @@ function yfit = compositeV_complex_unit(ip, x)
     if sigma == 0 && gamma == 0
         yfit = zeros(size(x));
     elseif sigma == 0
-        xpw = (x - p) / gamma;
-        Vc = 1 ./ (1 + 1i*2*xpw);
+        xpw = (x - p) / gamma;          % gamma is a HALF width
+        Vc = 1 ./ (1 + 1i*xpw);
         yfit = real(Vc * exp(-1i*ph));
     else
         z = ((x - p) + 1i*gamma) / (sigma*sqrt(2));

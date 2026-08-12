@@ -113,8 +113,10 @@ pars.fit.baselineOpt.TolFun      = 1e-6;
 % HSVD-derived SOFT PRIORS on the fine fit
 %   lambdaPrior: baseline penalty ||w.*(B*beta - hsvdBaseline)||^2. 
 %   lambdaWidth: Voigt total FWHM vs the HSVD linewidth.
-pars.fit.baselineOpt.lambdaPrior = 0.3;
-pars.fit.baselineOpt.lambdaWidth = 0.3;
+pars.fit.baselineOpt.lambdaPrior = 0;
+pars.fit.baselineOpt.lambdaWidth = 0.005;
+pars.fit.baselineOpt.widthPriorPeaks = [true true true false];  % NADH2 NADH6 NADH4 Trp
+pars.fit.baselineOpt.etaInit         = [0 0 0 1];               % NADH2 NADH6 NADH4 Trp
 
 % Lineshape kernel DISABLED: it is collinear with the Voigt Gaussian width
 pars.fit.lineShapeOpt.enable     = false;
@@ -125,7 +127,8 @@ pars.fit.lineShapeOpt.maxSide    = 0.50;
 pars.fit.hsvdClean.enable = false;
 
 % ---------------------------------------------------------------------
-% Coarse seeding / phase correction by HSVD 
+% Coarse seeding / phase correction by HSVD
+pars.fit.coarseFirstOrder       = false;
 pars.fit.hsvdCoarse.enable      = true;
 pars.fit.hsvdCoarse.K           = 60;
 pars.fit.hsvdCoarse.npts        = 1024;
@@ -136,6 +139,7 @@ pars.fit.hsvdCoarse.phaseTolDeg = [100 100 100 100];
 pars.watfit.method    = 'fit';
 pars.watfit.nComp     = 1;
 pars.watfit.ppm_range = [4 5.5];
+pars.watfit.etaInit   = 0;      % fit is insensitive to this seed (tested 0-1)
 
 % =====================================================================
 % Literature relaxation / water content (Swago 2025, NMR Biomed 5324)

@@ -626,6 +626,8 @@ if pars.dofit
         %   .ph_range  - [min max] phase bounds in degrees (default [-45 45])
         %   .baselineOpt - struct passed to curvefitAuto_varproBaseline
         %   .lineShapeOpt - struct passed to curvefitAuto_varproBaseline (optional)
+        %   .coarseFirstOrder - fit the 1st-order term of the coarse phase
+        %       (default false = zeroth order only; both coarse estimators)
         %   .hsvdClean - struct for HSVD nuisance signal removal before fitting
         %       .enable - true/false
         %       .K      - number of HSVD sinusoids (default 60)
@@ -681,6 +683,15 @@ if pars.dofit
         else
             peakWB = wb0;
         end
+        % per-peak starting Gaussian fraction (Voigt modes), pars.peaks.name order
+        peakEta = [];
+        if isfield(pars.fit.baselineOpt,'etaInit') && ~isempty(pars.fit.baselineOpt.etaInit)
+            peakEta = pars.fit.baselineOpt.etaInit(:).';
+            if isscalar(peakEta), peakEta = peakEta * ones(1,npksAll); end
+            assert(numel(peakEta) == npksAll, ...
+                'baselineOpt.etaInit must be scalar or length %d (pars.peaks.name)', npksAll);
+        end
+
         isBroad = startsWith(pars.peaks.name(:), 'Broad');
         if isfield(pars.fit,'broadWidthBounds') && ~isempty(pars.fit.broadWidthBounds)
             broadWB = pars.fit.broadWidthBounds;
@@ -801,6 +812,22 @@ if pars.dofit
                    'Use coarseMode ''perRegion'' with hsvdCoarse.enable = false.'])
         end
 
+        coarseFO = false;
+        if isfield(pars.fit,'coarseFirstOrder') && ~isempty(pars.fit.coarseFirstOrder)
+            coarseFO = logical(pars.fit.coarseFirstOrder);
+        end
+
+        % Per-peak enable for the HSVD width prior (lambdaWidth).  Logical
+        % vector in pars.peaks.name order, or [] for all peaks.
+        widthPriorPeaks = [];
+        if isfield(pars.fit.baselineOpt,'widthPriorPeaks') && ...
+                ~isempty(pars.fit.baselineOpt.widthPriorPeaks)
+            widthPriorPeaks = logical(pars.fit.baselineOpt.widthPriorPeaks(:))';
+            assert(numel(widthPriorPeaks) == numel(pars.peaks.name), ...
+                'baselineOpt.widthPriorPeaks must be logical, length %d (pars.peaks.name)', ...
+                numel(pars.peaks.name));
+        end
+
         % resolve each region's peak indices into pars.peaks.name
         regSel = cell(nRegions,1);
         peakCenters = mean(pars.peaks.range, 2);
@@ -856,10 +883,12 @@ if pars.dofit
             unionRange = [min(allRanges(:)) max(allRanges(:))];
             disp('Step 1: Coarse VARPRO (union)...')
             boC = pars.fit.baselineOpt;  boC.widthBounds = peakWB(allSelC,:);
+            if ~isempty(peakEta), boC.etaInit = peakEta(allSelC); end
             wiC = []; if isfield(pars.peaks,'widthInit') && ~isempty(pars.peaks.widthInit), wiC = pars.peaks.widthInit(allSelC); end
             [wsP, c0, w0, p0, pc0, pc1, cf] = nadCoarsePhase(ws, ppm, f0, center_freq, ...
                 unionRange, pars.peaks.range(allSelC,:), pars.fit.mode, ...
-                boC, minw, pars.plt, 'union', wiC, subsetHsvdOpt(hsvdC, allSelC, npks));
+                boC, minw, pars.plt, 'union', wiC, subsetHsvdOpt(hsvdC, allSelC, npks), ...
+                coarseFO);
             center0_all(allSelC) = c0;  width0_all(allSelC) = w0;  ph0_all(allSelC) = p0;
             if isstruct(cf) && isfield(cf,'hsvd') && isfield(cf.hsvd,'found')
                 foundAll(allSelC) = logical(cf.hsvd.found(:)');
@@ -895,10 +924,12 @@ if pars.dofit
                 if isempty(selC), selC = sel; end
                 lbl = regionLabel(regionList, r);
                 boC = pars.fit.baselineOpt;  boC.widthBounds = peakWB(selC,:);
+                if ~isempty(peakEta), boC.etaInit = peakEta(selC); end
                 wiC = []; if isfield(pars.peaks,'widthInit') && ~isempty(pars.peaks.widthInit), wiC = pars.peaks.widthInit(selC); end
                 [wsP_r, c0, w0, p0, pc0, pc1, cf] = nadCoarsePhase(ws, ppm, f0, center_freq, ...
                     regionList(r).fitRange, pars.peaks.range(selC,:), pars.fit.mode, ...
-                    boC, minw, pars.plt, lbl, wiC, subsetHsvdOpt(hsvdC, selC, npks));
+                    boC, minw, pars.plt, lbl, wiC, subsetHsvdOpt(hsvdC, selC, npks), ...
+                    coarseFO);
                 center0_all(selC) = c0;  width0_all(selC) = w0;  ph0_all(selC) = p0;
                 if isstruct(cf) && isfield(cf,'hsvd') && isfield(cf.hsvd,'found')
                     foundAll(selC) = logical(cf.hsvd.found(:)');
@@ -975,6 +1006,9 @@ if pars.dofit
             if ~(isfield(reg,'baselineOpt') && isfield(reg.baselineOpt,'widthBounds'))
                 baseR.widthBounds = peakWB(sel,:);
             end
+            if ~isempty(peakEta)
+                baseR.etaInit = peakEta(sel);
+            end
             % per-peak phase bounds: broad components near-absorptive, narrow
             % peaks keep the region phase range (phR)
             pbR = repmat(phR(:).', numel(sel), 1);
@@ -995,18 +1029,26 @@ if pars.dofit
                 baseR.priorBaseline = cfR.baselinePhased;
             elseif isfield(baseR,'lambdaPrior') && ~isempty(baseR.lambdaPrior) ...
                     && baseR.lambdaPrior > 0
-                % Do not let a grid mismatch quietly turn the prior off -- the
-                % fit would still run, just with a free baseline, and nothing
-                % downstream would show it.
+                % Do not let a missing or mis-sized prior quietly turn itself
+                % off -- the fit would still run, just with a free baseline,
+                % and nothing downstream would show it.
+                if isstruct(cfR) && isfield(cfR,'baselinePhased')
+                    why = sprintf('coarse baseline is %d points but the region grid is %d', ...
+                                  numel(cfR.baselinePhased), numel(inds_r));
+                else
+                    why = ['the coarse estimator supplied no baseline ' ...
+                           '(hsvdCoarse.enable = false has no component decomposition)'];
+                end
                 warning('dat2mat_svsNAD:priorGridMismatch', ...
-                    ['region %d (%s): coarse baseline is %d points but the region ' ...
-                     'grid is %d; lambdaPrior=%g will have NO effect here.'], ...
-                    r, regionLabel(regionList, r), numel(cfR.baselinePhased), ...
-                    numel(inds_r), baseR.lambdaPrior);
+                    'region %d (%s): %s; lambdaPrior=%g will have NO effect here.', ...
+                    r, regionLabel(regionList, r), why, baseR.lambdaPrior);
             end
-            % Width prior: the HSVD linewidth seed, but only for peaks HSVD actually found 
+            % Width prior: the HSVD linewidth seed, but only for peaks HSVD actually found
             pwR = width0_all(sel);
             pwR(~foundAll(sel)) = NaN;      % NaN entries are skipped downstream
+            if ~isempty(widthPriorPeaks)
+                pwR(~widthPriorPeaks(sel)) = NaN;
+            end
             baseR.priorWidth = pwR;
 
             lsR = [];
@@ -1202,6 +1244,15 @@ if pars.dofit
                 % The metabolite fit may carry PER-PEAK linewidth bounds. Those rows are meaningless here.
                 if isfield(watBaseOpt,'widthBoundsHz')
                     watBaseOpt = rmfield(watBaseOpt,'widthBoundsHz');
+                end
+                % same for the per-peak Voigt seed and width-prior mask
+                for fq = {'etaInit','widthPriorPeaks'}
+                    if isfield(watBaseOpt, fq{1})
+                        watBaseOpt = rmfield(watBaseOpt, fq{1});
+                    end
+                end
+                if isfield(watfit,'etaInit') && ~isempty(watfit.etaInit)
+                    watBaseOpt.etaInit = watfit.etaInit;
                 end
                 if isfield(watBaseOpt,'widthBounds') && ...
                         size(watBaseOpt.widthBounds,1) > 1 && ...
@@ -1479,11 +1530,14 @@ function v = optVec(o, fld, dflt, n)
     assert(numel(v) == n, '%s must be scalar or length %d', fld, n);
 
 function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
-        ws, ppm, f0, center_freq, fitRange, peakRange, mode, baselineOpt, minw, plt, label, widthInit, hsvdOpt)
+        ws, ppm, f0, center_freq, fitRange, peakRange, mode, baselineOpt, minw, plt, label, widthInit, hsvdOpt, firstOrder)
 % Coarse HSVD decomposition + phase correction derived from this region's peaks.
 % Returns the phase-corrected full spectrum (wsP), coarse seeds for the
 % region's peaks (center0/width0/ph0), the applied phase (pc0/pc1), and a
 % coarse fit struct (.fit = assigned components, .baseline = unassigned).
+%
+% firstOrder (optional, default false) fits the 1st-order phase term; honoured
+% by both coarse estimators.
 %
 % hsvdOpt fields (all optional):
 %   .enable      true.  false selects the previous coarse estimator, a VARPRO
@@ -1531,10 +1585,12 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
     % Voigt fit over the region (see coarseVarpro).  Until 2026-08 this flag
     % was parsed but never tested, and the VARPRO code it named was commented
     % out, so setting it false silently changed nothing.
+    if nargin < 14 || isempty(firstOrder), firstOrder = false; end
+
     if ~hsvdOpt.enable
         [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = coarseVarpro( ...
             ws, x, y, ppm, center_freq, peakRange, mode, baselineOpt, minw, ...
-            plt, label, center0, width0);
+            plt, label, center0, width0, firstOrder);
         return
     end
 
@@ -1575,12 +1631,19 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
         [cU, ord] = sort(center0(use));
         phU = unwrap(ph0(use(ord)) * pi/180) * 180/pi;   % avoid +/-180 wrap
         wU  = sig(use(ord)).^2;                          % signal^2 weights
-        V   = [cU(:), ones(numel(cU),1)];
-        p   = ((V' * (wU .* V)) \ (V' * (wU .* phU(:))))';
-        pc0 = polyval(p, center_freq);           % 0th order at pivot
-        % shiftSpectrumPhase convention: pc1 is total 1st-order phase
-        % across half the bandwidth
-        pc1 = p(1) * abs(ppm(end) - ppm(1)) / 2;
+        if ~firstOrder
+            % signal^2-weighted mean phase over the peaks
+            pc0 = sum(wU(:) .* phU(:)) / sum(wU);
+            pc1 = 0;
+            p   = [0 pc0];
+        else
+            V   = [cU(:), ones(numel(cU),1)];
+            p   = ((V' * (wU .* V)) \ (V' * (wU .* phU(:))))';
+            pc0 = polyval(p, center_freq);           % 0th order at pivot
+            % shiftSpectrumPhase convention: pc1 is total 1st-order phase
+            % across half the bandwidth
+            pc1 = p(1) * abs(ppm(end) - ppm(1)) / 2;
+        end
     end
     wsP = shiftSpectrumPhase(ws, [pc0 pc1], ppm, center_freq);
 
@@ -1615,7 +1678,7 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = nadCoarsePhase( ...
 
 function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = coarseVarpro( ...
         ws, x, y, ppm, center_freq, peakRange, mode, baselineOpt, minw, ...
-        plt, label, center0, width0)
+        plt, label, center0, width0, firstOrder)
 % Coarse estimator used before 041082f (2026-07-23): a loose VARPRO fit of the
 % region with the SAME lineshape model as the fine fit, from which the seeds
 % and the linear phase are read off.  Selected by hsvdCoarse.enable = false.
@@ -1663,8 +1726,12 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = coarseVarpro( ...
     end
 
     % linear phase (pc0 + pc1) through this region's peaks
+    if nargin < 14 || isempty(firstOrder), firstOrder = false; end
     if np == 1
         pc0 = ph0;
+        pc1 = 0;
+    elseif ~firstOrder
+        pc0 = mean(ph0);                           % zeroth order only (default)
         pc1 = 0;
     else
         p   = polyfit(center0(:), ph0(:), 1);
@@ -1753,14 +1820,15 @@ function checkParsFields(pars)
 baselineFields = {'enable','knotSpacing','lambda','lambdaAmpl','lambdaPrior', ...
                   'lambdaWidth','TolFun','TolX','linearTol','normalize','verbose', ...
                   'weights','amplUB','widthBounds','widthBoundsHz','centerBounds', ...
-                  'phaseBounds','phaseInit','priorBaseline','priorWidth'};
+                  'phaseBounds','phaseInit','priorBaseline','priorWidth','etaInit', ...
+                  'widthPriorPeaks'};
 
 KNOWN = { ...
   '', {'plt','pltSpec','removeOS','lb','lb_met','lb_wat','den','eccopt', ...
        'WatSupPre','WatSupPost','peaks','ccopt','block_align','base','hsvd', ...
        'PC','PCpivot','dofit','fit','flag','watfit','waterScaling'}; ...
   'fit', {'mode','ph_range','ppm_range','ppm_range_coarse','baselineOpt','regions', ...
-          'coarseMode','hsvdCoarse','hsvdClean','lineShapeOpt','focusRange', ...
+          'coarseMode','coarseFirstOrder','hsvdCoarse','hsvdClean','lineShapeOpt','focusRange', ...
           'focusWeight','broadWidthBounds','broadWidthInit','broadPhaseBounds','peaks'}; ...
   'fit.baselineOpt',         baselineFields; ...
   'fit.regions',             {'fitRange','peaks','name','baselineOpt','peakSelect'}; ...
@@ -1771,7 +1839,7 @@ KNOWN = { ...
                               'normalize','areaPadFactor'}; ...
   'peaks',                   {'name','range','widthInit'}; ...
   'watfit',                  {'method','mode','nComp','ppm_range','ph_range', ...
-                              'baselineOpt','lineShapeOpt'}; ...
+                              'baselineOpt','lineShapeOpt','etaInit'}; ...
   'watfit.baselineOpt',      baselineFields; ...
   'block_align',             {'size','method','Nfit','ppmRange','saveDebug'}; ...
   'ccopt',                   {'minsig_frac'}; ...
