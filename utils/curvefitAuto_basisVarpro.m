@@ -26,6 +26,10 @@ function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo,
 %                  .f0          - Larmor frequency in MHz (required)
 %                  .t           - optional time axis [Nb x 1]
 %                  .ppmPivot    - pivot ppm for 1st-order phase (default 0)
+%                  .delayPhase  - optional @(ppm) phase (rad) each point carries
+%                                 from t(1); data and basis spectra are
+%                                 multiplied by exp(-1i*delayPhase(x)) on the
+%                                 fit window (absorptive frame)
 %   fitOpt     - struct of fit options (all fields optional):
 %                  .fitRange      - [min max] ppm window to fit
 %                  .complex       - true/false; default: ~isreal(y)
@@ -62,10 +66,18 @@ function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo,
 %                                   to lsqnonlin; followers are aliased to
 %                                   it. Untied parameters remain free and
 %                                   independent.
+%                  .nStart        - number of starting points (default 1);
+%                                   start 1 uses the inits above, starts
+%                                   2..nStart perturb them (fixed seeds), and
+%                                   the lowest-cost fit is returned
 %                  .maxIter, .tolFun, .tolX, .verbose
 %   baselineOpt - spline baseline options (same as curvefitAuto_varproBaseline):
 %                  .enable, .knotSpacing, .lambda, .normalize, .amplUB,
 %                  .linearTol, .lambdaAmpl, .verbose, .weights
+%                  .causal - true: each spline column is the real part of a
+%                            causal signal with its first round(t(1)/dwell)
+%                            points zeroed, given its Hilbert imaginary part
+%                            (use with timeInfo.delayPhase; default false)
 %   parametricOpt - optional parametric add-on peaks (treated like basis
 %                   FIDs generated analytically):
 %                  .enable     - true/false (default false)
@@ -113,6 +125,7 @@ function output = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo,
 %   .lineShapePars   - fitted side coefficients of the shared kernel
 %   .lineShapeKernel - shared kernel actually used (vector, length 2*nSide+1)
 %   .fitOpt, .baselineOpt, .parametricOpt, .lineShapeOpt, .timeInfo - echoes of inputs
+%   .multiStart      - (nStart > 1) .cost of every start and .best index
 %
 % NW - 04/2026
 
@@ -221,6 +234,10 @@ nMet    = size(allFIDs, 2);
 % ------------------------------------------------------------------- %
 nParam = size(paramFIDs,2);
 fitOpt = parseFitOpt(fitOpt, nMet, nBasis, nParam, parametricOpt, y);
+if fitOpt.nStart > 1
+    output = bestOfStarts(x, y, basisFIDs, basisInfo, timeInfo, fitOpt, baselineOpt, lineShapeOpt, parametricOpt);
+    return
+end
 
 % restrict data to fit range
 if isempty(fitOpt.fitRange)
@@ -234,6 +251,11 @@ nFit = length(xFit);
 if nFit < 10
     error('fitOpt.fitRange produced <10 points; check axis units');
 end
+frameRot = [];
+if isfield(timeInfo,'delayPhase') && ~isempty(timeInfo.delayPhase)
+    frameRot = exp(-1i*timeInfo.delayPhase(xFit));
+    yFit = yFit .* frameRot;
+end
 
 complexFit = fitOpt.complex;
 if complexFit && isreal(yFit)
@@ -246,7 +268,9 @@ end
 % ------------------------------------------------------------------- %
 baselineOpt = parseBaselineOpt(xFit, baselineOpt);
 
-if baselineOpt.enable
+if baselineOpt.enable && baselineOpt.causal
+    [B, knots] = makeCausalSplineBasis(x, fitIdx, baselineOpt.knotSpacing, max(0, round(t(1)/dwell)));
+elseif baselineOpt.enable
     [B, knots] = makeSplineBasis(xFit, baselineOpt.knotSpacing, baselineOpt.normalize);
 else
     B = zeros(nFit, 0);
@@ -584,6 +608,7 @@ output.basisInfo      = basisInfo;
 
         % Restrict to fit range
         specFit = specOnData(fitIdx, :);
+        if ~isempty(frameRot), specFit = specFit .* frameRot; end
 
         if complexFit
             Apk = specFit;
@@ -810,6 +835,9 @@ function opt = parseBaselineOpt(x, opt)
     if ~isfield(opt,'weights') || isempty(opt.weights)
         opt.weights = [];
     end
+    if ~isfield(opt,'causal') || isempty(opt.causal)
+        opt.causal = false;
+    end
 end
 
 function opt = parseParametricOpt(opt)
@@ -875,6 +903,41 @@ function opt = parseFitOpt(opt, nMet, nBasis, nParam, parametricOpt, y)
 
     if ~isfield(opt,'softConstraints'), opt.softConstraints = []; end
     if ~isfield(opt,'verbose') || isempty(opt.verbose), opt.verbose = false; end
+    if ~isfield(opt,'nStart') || isempty(opt.nStart), opt.nStart = 1; end
+end
+
+function output = bestOfStarts(x, y, basisFIDs, basisInfo, timeInfo, fitOpt, baselineOpt, lineShapeOpt, parametricOpt)
+    nStart = fitOpt.nStart;
+    nM = numel(fitOpt.shiftInit);
+    cost = nan(1, nStart);
+    for st = 1:nStart
+        fo = fitOpt;
+        fo.nStart = 1;
+        if st > 1
+            rs = RandStream('mt19937ar','Seed',st);
+            fo.shiftInit  = clampTo(fitOpt.shiftInit + 4*randn(rs,nM,1), fitOpt.shiftBounds);
+            fo.lbLInit    = clampTo(fitOpt.lbLInit .* exp(0.3*randn(rs,nM,1)), fitOpt.lbLBounds);
+            fo.phaseInit  = clampTo(fitOpt.phaseInit + 8*randn(rs,nM,1), fitOpt.phaseBounds);
+            fo.phase1Init = clampTo(fitOpt.phase1Init + 3*randn(rs), fitOpt.phase1Bounds(:).');
+        end
+        out = curvefitAuto_basisVarpro(x, y, basisFIDs, basisInfo, timeInfo, fo, baselineOpt, lineShapeOpt, parametricOpt);
+        r = out.residualFit;
+        if fitOpt.complex
+            cost(st) = sum(abs(r).^2);
+        else
+            cost(st) = sum(real(r).^2);
+        end
+        if cost(st) == min(cost)
+            output = out;
+        end
+    end
+    [~, ib] = min(cost);
+    output.multiStart = struct('cost', cost, 'best', ib);
+    output.fitOpt.nStart = nStart;
+end
+
+function v = clampTo(v, bounds)
+    v = min(max(v, bounds(:,1)), bounds(:,2));
 end
 
 function v = getOrDefault(s, f, d)
@@ -929,6 +992,39 @@ function [Bout, knotsout] = makeSplineBasis(xin, knotSpacing, normalizeFlag)
         scl = max(abs(Bout), [], 1);
         scl(scl==0) = 1;
         Bout = Bout ./ scl;
+    end
+end
+
+function [Bout, knotsout] = makeCausalSplineBasis(x, fitIdx, knotSpacing, n0)
+% Uniform cubic B-splines on the fit-window breaks, evaluated on the full
+% axis; each column is made causal (Hilbert imaginary part) and its first n0
+% time points are zeroed.  Returned on the fit window.
+    x = x(:);
+    N = numel(x);
+    xFit = x(fitIdx);
+    xmin = min(xFit);
+    xmax = max(xFit);
+    if knotSpacing <= 0
+        error('baseline knotSpacing must be > 0');
+    end
+    nIntervals = max(2, round((xmax - xmin)/knotSpacing));
+    h = (xmax - xmin)/nIntervals;
+    knotsout = xmin + h*(-3:nIntervals+3);
+    nBasis = nIntervals + 3;
+    Bout = zeros(nnz(fitIdx), nBasis);
+    for jj = 1:nBasis
+        kn = knotsout(jj:jj+4);
+        b = zeros(N,1);
+        in = x > kn(1) & x < kn(5);
+        b(in) = fnval(spmak(kn,1), x(in));
+        b = b / max(b);
+        g = ifft(ifftshift(b));
+        c = zeros(N,1);
+        c(1) = g(1);
+        c(2:N/2) = 2*g(2:N/2);
+        c(1:min(n0,N)) = 0;
+        Bc = fftshift(fft(c));
+        Bout(:,jj) = Bc(fitIdx);
     end
 end
 

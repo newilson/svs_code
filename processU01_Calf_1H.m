@@ -63,23 +63,14 @@ pars.WatSupPost.opts.hsvd.nsin   = 25;
 pars.dofit         = 'varpro';
 pars.fit.mode      = 5;                 % Voigt
 pars.fit.ppm_range = [8.95 10.7];
-% NOTE: wide phase range is intentional.  Tightening ph_range to [-15 15]
-% (and/or making lineShapeOpt symmetric / lowering its maxSide; see below)
-% makes the per-component figures LOOK cleaner -- pure-absorptive peaks,
-% baseline no longer floats above the data -- but tested (May 2026 on S095)
-% it makes NADH2:NADH6:NADH4 LESS self-consistent across averages/sessions.
-% The wide phase + asymmetric lineShape kernel are absorbing real systematic
-% distortion (eddy currents, B0 asymmetry, residual phase drift); take that
-% freedom away and the distortion is forced into the peak amplitudes, where
-% it pulls each NAD proton unequally.  Do not narrow without re-verifying
-% NAD self-consistency.  See feedback-nad-1h-phase-and-lineshape-stay-wide.
 pars.fit.ph_range  = [-60 60];
+pars.fit.nStarts   = 32;
 
 pars.peaks.name    = {'NADH2','NADH6','NADH4','NR','Trp','Peak10_3'};
 pars.peaks.range   = [9.25 9.45;     % NADH2     ~9.35
                       9.05 9.25;     % NADH6     ~9.15
                       8.80 9.05;     % NADH4     ~8.93
-                      9.6 9.75;     % NR        ~9.70
+                      9.6 9.8;      % NR        ~9.75
                       10.05 10.15;   % Trp       ~10.1  (small)
                       10.25 10.35];  % Peak10_3  ~10.3  (larger, unidentified)
 
@@ -108,19 +99,23 @@ pars.fit.baselineOpt.knotSpacing = 2;
 pars.fit.baselineOpt.lambda      = 1;
 pars.fit.baselineOpt.lambdaAmpl  = 0;
 pars.fit.baselineOpt.TolFun      = 1e-6;
+pars.fit.baselineOpt.widthBoundsHz = [10 90];
+% NADH2, NADH6 and NADH4 share one total width and one Gaussian fraction
+pars.fit.baselineOpt.widthGroup  = [1 1 1 0 0 0];
+pars.fit.baselineOpt.etaGroup    = [1 1 1 0 0 0];
 
-% NOTE: asymmetric shared lineshape kernel is intentional -- see the wide
-% ph_range comment above.  Together they absorb real systematic line
-% distortion; constraining either degrades NAD self-consistency.  maxSide
-% is 0.20 here (calf) vs 0.50 in the brain driver -- calf data appears to
-% tolerate a slightly tamer kernel; do not lower further without re-checking
-% NAD ratios.
-pars.fit.lineShapeOpt.enable     = true;
+pars.fit.lineShapeOpt.enable     = false;
 pars.fit.lineShapeOpt.nSide      = 4;
 pars.fit.lineShapeOpt.asymmetric = true;
 pars.fit.lineShapeOpt.maxSide    = 0.20;
 
 pars.fit.hsvdClean.enable = false;
+
+% Fixed coarse phase, determined empirically: lowest median fine-fit residual
+% (and NADH2/NADH6 ~1) over a -45..+45 deg sweep of the 16 U01 calf sessions,
+% sequence %CustomerSeq%\svssel_20260101 (two early sessions svssel_latest),
+% TR 500 / TE 13 ms.  See processU01_Brain_1H_NOTES.md.
+pars.fit.coarsePhaseFixedDeg = -20;
 
 pars.watfit.method    = 'fit';
 pars.watfit.nComp     = 1;
@@ -208,18 +203,18 @@ nadMid   = [];        watMid   = [];
 
 for k = 1:numel(allF)
     fn = allF(k).name;
-    tok = regexp(fn, 'MID(\d+)', 'tokens', 'once');
+    tok = regexp(fn, '[MF]ID(\d+)', 'tokens', 'once');
     if isempty(tok), continue; end          % require MID# to disambiguate
     midNum = str2double(tok{1});
 
-    if contains(fn, '_NAD_', 'IgnoreCase', true)
+    if contains(fn, '_NAD', 'IgnoreCase', true)
         nNAD = nNAD + 1;
-        nadFiles(nNAD) = string(fn); %#ok<AGROW>
-        nadMid(nNAD)   = midNum;     %#ok<AGROW>
-    elseif contains(fn, '_Water_', 'IgnoreCase', true)
+        nadFiles(nNAD) = string(fn); 
+        nadMid(nNAD)   = midNum;    
+    elseif contains(fn, '_Water', 'IgnoreCase', true)
         nWAT = nWAT + 1;
-        watFiles(nWAT) = string(fn); %#ok<AGROW>
-        watMid(nWAT)   = midNum;     %#ok<AGROW>
+        watFiles(nWAT) = string(fn);
+        watMid(nWAT)   = midNum;    
     end
 end
 

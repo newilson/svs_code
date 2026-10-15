@@ -14,7 +14,7 @@ function processU01_Brain_1H(SessionDir, FinalOutDir, segTsv, plt, outStem)
 %   (output, parsOut, hdr, absQ, voxel, segFracs, pars)
 %
 % When several candidate .dat files are present, the highest MID number is
-% used.  See pick_latest_pair for the recognised naming conventions.
+% used.  See pick_latest_pair for the recognized naming conventions.
 %
 
 
@@ -129,6 +129,7 @@ pars.fit.hsvdClean.enable = false;
 % ---------------------------------------------------------------------
 % Coarse seeding / phase correction by HSVD
 pars.fit.coarseFirstOrder       = false;
+pars.fit.coarsePhaseMaxDeg      = 25;
 pars.fit.hsvdCoarse.enable      = true;
 pars.fit.hsvdCoarse.K           = 60;
 pars.fit.hsvdCoarse.npts        = 1024;
@@ -218,15 +219,15 @@ function [wsDat, watDat] = pick_latest_pair(datDir)
 % Two naming conventions are recognized, because different studies label the
 % same two scans differently:
 %
-%   water-suppressed  : '_NAD_'    or  'ppm'
-%   water reference   : '_Water_'  or  'waterref'
+%   water-suppressed  : '_NAD'    or  'ppm'
+%   water reference   : '_Water'  or  'waterref'
 %
 
 
 allF = dir(fullfile(datDir, '*svssel*.dat'));
 
-wsPat  = {'_NAD_',   'ppm'   };   % water-suppressed (metabolite)
-watPat = {'_Water_', 'waterref'};   % water reference
+wsPat  = {'_NAD',   'ppm'   };   % water-suppressed (metabolite)
+watPat = {'_Water', 'waterref'};   % water reference
 
 nNAD = 0; nWAT = 0;
 nadFiles = strings(0); watFiles = strings(0);
@@ -234,18 +235,18 @@ nadMid   = [];        watMid   = [];
 
 for k = 1:numel(allF)
     fn = allF(k).name;
-    tok = regexp(fn, 'MID(\d+)', 'tokens', 'once');
+    tok = regexp(fn, '[MF]ID(\d+)', 'tokens', 'once');
     if isempty(tok), continue; end          % require MID# to disambiguate
     midNum = str2double(tok{1});
 
     if any(contains(fn, wsPat, 'IgnoreCase', true))
         nNAD = nNAD + 1;
-        nadFiles(nNAD) = string(fn); %#ok<AGROW>
-        nadMid(nNAD)   = midNum;     %#ok<AGROW>
+        nadFiles(nNAD) = string(fn); 
+        nadMid(nNAD)   = midNum;     
     elseif any(contains(fn, watPat, 'IgnoreCase', true))
         nWAT = nWAT + 1;
-        watFiles(nWAT) = string(fn); %#ok<AGROW>
-        watMid(nWAT)   = midNum;     %#ok<AGROW>
+        watFiles(nWAT) = string(fn); 
+        watMid(nWAT)   = midNum;     
     end
 end
 

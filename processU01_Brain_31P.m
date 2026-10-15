@@ -1,10 +1,17 @@
-function processU01_Brain_31P(SessionDir, FinalOutDir, segTsv, plt, extRef)
+function processU01_Brain_31P(SessionDir, FinalOutDir, segTsv, plt, extRef, ref31P)
 % PROCESSU01_BRAIN_31P  Absolute 31P quantification for one U01 brain session.
 %
 %   processU01_Brain_31P(SessionDir, FinalOutDir, segTsv, plt)
+%   processU01_Brain_31P(SessionDir, FinalOutDir, segTsv, plt, extRef, ref31P)
 %
 % segTsv is OPTIONAL (QC only for 31P): pass '' or omit it to skip the
 % tissue-fraction read; the absolute quant does not depend on it.
+%
+% ref31P selects which reference populates absQ.reference/absQ.metabolites:
+% 'aATP' (default), 'PCr', or 'External'.  Every available set is computed and
+% saved under absQ.byRef / absQ.external regardless of the choice; switching
+% rescales all concentrations by one common factor and never changes a ratio
+% between metabolites within a scan.  'External' requires extRef.enable=true.
 %
 % Reads the highest-MID *31p*.dat from <SessionDir>\datfiles\, runs the
 % basis-Varpro fit from demo_dat2mat_svs31p.m via dat2mat_svs31p.m, then
@@ -37,15 +44,24 @@ arguments
     segTsv      char = ''     % OPTIONAL: seg is QC-only for 31P (see below)
     plt         (1,1) logical = false
     extRef      struct = struct()   % OPTIONAL external-reference quant (off unless .enable=true)
+    ref31P      (1,:) char = 'aATP' % primary reference: aATP | PCr | External
 end
 
 % External-reference (phantom) absolute quant is entirely optional and OFF by
 % default: with extRef.enable=false nothing below changes and the internal
 % aATP reference path runs exactly as before.  See extRefDefaults (bottom) for
 % every tunable field.
-extRef    = extRefDefaults(extRef, SessionDir);
+extRef    = extRefDefaults(extRef, SessionDir, FinalOutDir, segTsv);
 useExtRef = extRef.enable;
 if useExtRef, extRef.plt = extRef.plt || plt; end
+
+% Which reference populates absQ.reference / absQ.metabolites.  All available
+% sets are computed and saved regardless; this only picks the primary.
+if isempty(ref31P), ref31P = 'aATP'; end
+assert(any(strcmpi(ref31P, {'aATP','PCr','External'})), ...
+       'ref31P must be aATP, PCr or External (got ''%s'')', ref31P);
+assert(~strcmpi(ref31P,'External') || useExtRef, ...
+       'ref31P=External requires the external quant to be enabled (extRef.enable).');
 
 assert(isfolder(SessionDir), 'SessionDir not found: %s', SessionDir);
 if ~isfolder(FinalOutDir), mkdir(FinalOutDir); end
@@ -61,7 +77,8 @@ fprintf('31P : %s\n', datFile);
 % =====================================================================
 pars = struct();
 pars.lb         = 3;
-pars.blp.flag   = true;
+pars.blp.flag   = false;
+pars.dropPts    = 8;
 pars.PC         = 0;
 pars.plt        = plt;
 
@@ -83,8 +100,7 @@ pars.fit.metabs       = { ...
     'PE','PC','DPG1','DPG2','Pi','GPE','GPC','BroadMP', ...
     'PCr','gATP','aATP','bATP', ...
     'NADH','NADplus', ...
-    'UDPGal','UDPGlc','UDPGalNAc','UDPGlcNAc', ...
-    'Broad10_5'};
+    'UDPGal','UDPGlc','UDPGalNAc','UDPGlcNAc'};
 pars.fit.phase1Enable = true;
 
 % Add the external-reference singlet to the basis subset only when enabled.
@@ -106,7 +122,6 @@ isBroad = startsWith(pars.fit.metabs,'Broad');
 shB = repmat([-60 60], nMet, 1);
 shB(isUDP,:)   = repmat([-6   6],   sum(isUDP),   1);
 shB(isNAD,:)   = repmat([-12  12],  sum(isNAD),   1);
-shB(strcmp(pars.fit.metabs,'Broad10_5'),:) = [-300 60];
 
 lbB = repmat([0 100], nMet, 1);
 lbB(isUDP,:)   = repmat([15 50],  sum(isUDP),   1);
@@ -131,13 +146,15 @@ pars.fit.fitOpt.shiftBounds = shB;
 pars.fit.fitOpt.lbLBounds   = lbB;
 pars.fit.fitOpt.lbLInit     = lbInit;
 pars.fit.fitOpt.phaseBounds = [-20 20];
+pars.fit.fitOpt.nStart      = 8;
 
 sc(1) = struct('idxA','UDPGal',    'idxB','UDPGlcNAc','ratio',0.53,'lambda',1e4);
 sc(2) = struct('idxA','UDPGlc',    'idxB','UDPGlcNAc','ratio',1.00,'lambda',1e4);
 sc(3) = struct('idxA','UDPGalNAc', 'idxB','UDPGlcNAc','ratio',0.80,'lambda',1e4);
 pars.fit.softConstraints = sc;
 
-pars.fit.tieGroups   = [];
+pars.fit.tieGroups   = struct('members',{{'aATP','NADplus','NADH','UDPGal','UDPGlc','UDPGalNAc','UDPGlcNAc'}, {'aATP','NADplus','NADH'}, {'UDPGal','UDPGlc','UDPGalNAc','UDPGlcNAc'}}, ...
+                              'params',{{'lbL','lbG'}, {'phi0'}, {'phi0'}});
 pars.fit.lineShapeOpt = struct('enable',false,'nSide',3,'asymmetric',true,'maxSide',0.3);
 
 % =====================================================================
@@ -149,25 +166,22 @@ metProps = struct( ...
     'name',  {'PE','PC','DPG1','DPG2','Pi','GPE','GPC','BroadMP', ...
               'PCr','gATP','aATP','bATP', ...
               'NADH','NADplus', ...
-              'UDPGal','UDPGlc','UDPGalNAc','UDPGlcNAc', ...
-              'Broad10_5'}, ...
+              'UDPGal','UDPGlc','UDPGalNAc','UDPGlcNAc'}, ...
     'T1_ms', {6000, 6000, 3000, 3000, 3500, 6000, 6000, 3000, ...
               3800, 1200, 1200, 1500, ...
                400,  400, ...
-               500,  500,  500,  500, ...
-              3000}, ...
+               500,  500,  500,  500}, ...
     'T2_ms', {200, 200, 100, 100, 150, 200, 200, 150, ...
               180,  40,  40,  30, ...
                10,  10, ...
-               10,  10,  10,  10, ...
-              50}, ...
+               10,  10,  10,  10}, ...
     ... nPhos here is DELIBERATELY 1 for every species, including the NAD and
     ... UDP pyrophosphates (2 P each).  The spin count is already divided out
     ... upstream: dat2mat_svs31p computes amplScaled = ampl ./ n from
     ... basisInfo.n (2 for NADH/NADplus/UDP*), and the drivers pass amplScaled
     ... as fitAreas.  Setting 2 here would apply the same correction twice and
     ... halve NAD+/NADH a second time.
-    'nPhos', {1,1,1,1,1,1,1,1,  1,1,1,1,  1,1,  1,1,1,1,  1});
+    'nPhos', {1,1,1,1,1,1,1,1,  1,1,1,1,  1,1,  1,1,1,1});
 
 % External-reference relaxation/nuclei properties (placeholders; edit when
 % the phantom compound's T1/T2 are measured).
@@ -281,10 +295,14 @@ absQ.byRef.(refName)    = refQuant31P(refName,    refConc_mM, ...
 absQ.byRef.(altRefName) = refQuant31P(altRefName, altRefConc_mM, ...
                                       fitNames, fitAreas, metProps, TR_ms, TE_ms);
 
-% Primary reference (aATP for brain) stays in absQ.reference/absQ.metabolites
-% so every existing consumer of this .mat keeps working unchanged.
-absQ.reference   = absQ.byRef.(refName).reference;
-absQ.metabolites = absQ.byRef.(refName).metabolites;
+% Primary reference populates absQ.reference/absQ.metabolites, which is what
+% the Stage 5 summary and checkU01_2026_relaxation read.  With ref31P=External
+% this internal set is the basis for extRefQuant31P's ext_over_int column and
+% is replaced by the external set after that call.
+if strcmpi(ref31P,'PCr'), priName = altRefName; else, priName = refName; end
+absQ.reference   = absQ.byRef.(priName).reference;
+absQ.metabolites = absQ.byRef.(priName).metabolites;
+absQ.primaryRef  = priName;
 
 fprintf('\n--- 31P concentrations [mM] by reference ---\n');
 printByRef(absQ.byRef, {refName, altRefName});
@@ -309,14 +327,45 @@ if useExtRef
         end
     end
     fprintf('extRef: prescribed excitation flip = %.1f deg\n', extRef.flipDeg);
+    if isempty(extRef.slabThickness_mm)
+        try
+            extRef.slabThickness_mm = double(hdr.MeasYaps.sSpecPara.sVoI.dThickness);
+        catch
+            warning(['extRef: could not read ISIS slab thickness from hdr; V_ref ' ...
+                     'falls back to the segmented phantom mask.']);
+        end
+    end
+
+    % Acquisition excitation geometry, for the spectral profile term.  These
+    % are THIS scan's values and differ from the B1 calibration's, which uses
+    % a longer pulse to reach flips past 90 deg.
+    [extRef.acqPulseDur, extRef.acqExcCtr, extRef.hzPerPpm] = acqExcGeom(hdr);
+    extRef.acqRefVolt = double(hdr.MeasYaps.sTXSPEC.asNucleusInfo{1}.flReferenceAmplitude);
+    extRef.basisInfo = basisInfoOf(output);
+    extRef.line      = output.refExtLine;
+    extRef.refPpm    = output.refExtLine.ppm;
+
     try
         absQ.external = extRefQuant31P(fitNames, fitAreas, metProps, ...
-            TR_ms, TE_ms, extRef, absQ, FinalOutDir, scanID);
+            TR_ms, TE_ms, extRef, absQ);
     catch ME
         warning('External-reference quant failed: %s', ME.message);
         absQ.external = struct('ok', false, 'error', ME.message);
     end
 end
+
+% Promote the external set to primary when asked.  Hard error rather than a
+% silent fall back to an internal reference: the two differ by a scale factor,
+% so quietly substituting one would mislabel every concentration.
+if strcmpi(ref31P,'External')
+    assert(isfield(absQ,'external') && isfield(absQ.external,'ok') && absQ.external.ok, ...
+           'ref31P=External but the external quant did not succeed (see absQ.external).');
+    absQ.reference   = struct('name','RefExt','conc_mM',extRef.refConc_mM, ...
+                              'T1_ms',NaN,'T2_ms',NaN,'nPhos',NaN,'R',NaN);
+    absQ.metabolites = absQ.external.metabolites;
+    absQ.primaryRef  = 'External';
+end
+fprintf('31P primary reference: %s\n', absQ.primaryRef);
 
 % =====================================================================
 % Save
@@ -380,23 +429,23 @@ end
 
 % =====================================================================
 function datFile = pick_latest_31p(datDir)
-% Highest-MID *31p*.dat in datDir.
+% Highest-MID(or FID) *31p*.dat in datDir.
 allF = dir(fullfile(datDir, '*31p*.dat'));
 assert(~isempty(allF), 'No *31p*.dat found in %s', datDir);
 
 mids = nan(1, numel(allF));
 for k = 1:numel(allF)
-    tok = regexp(allF(k).name, 'MID(\d+)', 'tokens', 'once');
+    tok = regexp(allF(k).name, '[MF]ID(\d+)', 'tokens', 'once');
     if ~isempty(tok), mids(k) = str2double(tok{1}); end
 end
-assert(any(~isnan(mids)), 'No MID# in any *31p*.dat filename in %s', datDir);
+assert(any(~isnan(mids)), 'No MID#/FID# in any *31p*.dat filename in %s', datDir);
 
 [~, iMax] = max(mids);
 datFile = fullfile(datDir, allF(iMax).name);
 end
 
 % =====================================================================
-function e = extRefDefaults(e, SessionDir)
+function e = extRefDefaults(e, SessionDir, FinalOutDir, segTsv)
 % Fill defaults for the optional external-reference quant.  Every field is
 % overridable by the caller; the whole feature is off unless e.enable=true.
 if ~isstruct(e), e = struct(); end
@@ -404,8 +453,8 @@ d = struct( ...
     'enable',           false, ...
     'anatomy',          'brain', ... % 'brain' | 'calf' -- selects tissue segmentation
     'applyB1',          false, ...   % B1+ / receive correction DISABLED (QC-reported only)
-    'b1Dir',            '', ...      % auto-located under SessionDir\E100 if empty
-    'refPpm',           8.0, ...     % external-reference chemical shift (PCr=0)
+    'b1CalibFiles',     [], ...     % explicit B1CALIB DICOMs (cellstr); auto-located under SessionDir\E* if empty
+    'refPpm',           8.0, ...     % nominal phantom shift (PCr=0); used only if no line is located
     'refConc_mM',       500, ...     % known phantom concentration (sodium phosphate)
     'nP',               1, ...       % equivalent 31P per molecule (sodium phosphate = 1)
     'flipDeg',          [], ...      % prescribed excitation flip (deg); auto-read from hdr if empty
@@ -414,16 +463,10 @@ d = struct( ...
     'refShiftBoundsHz', [-40 40], ...% ~+-0.33 ppm at 7T, keeps RefExt on the 8 ppm peak
     'refLbBoundsHz',    [0 40], ...  % NARROW phantom line (liquid phantom); envelope -> baseline
     'refLbInitHz',      15, ...
-    'dropEndSlices',    1, ...       % B1 slab = all slices minus this many at EACH end
-    'brainThr',         0.15, ...    % head-mask threshold (fraction of max), used as fallback
+    'refArea_mm2',      200, ...     % measured phantom cross-section (180-220 observed)
+    'slabThickness_mm', [], ...      % ISIS slab (mm); auto-read from hdr if empty
     'brainMaskNii',     '', ...      % HD-BET brain mask NIfTI (skull-stripped T1); overrides threshold
-    'phantThr',         0.05, ...    % phantom-mask threshold (fraction of max)
-    'phantMinVox',      5, ...       % min phantom size (voxels)
-    'phantomMask',      [], ...      % optional explicit phantom mask override
     'addBroadBG',       true, ...    % add broad component under the +8 ppm envelope
-    'phantomB1Method',  'extrap', ...% 'extrap' (poly-fit brain B1 -> phantom), 'measure', 'value'
-    'b1ExtrapOrder',    2, ...       % polynomial order for B1 extrapolation
-    'phantomB1Value',   [], ...      % relB1 used when phantomB1Method='value'
     'reciprocityReceive', true, ...  % add receive factor relB1_ref/relB1_M (reciprocity: assume B1-=B1+)
     'brainVol_mL',      [], ...      % explicit brain-in-slab volume (mL); overrides everything below
     't1Nii',            '', ...      % T1 NIfTI (for HD-BET brain INT ISIS-slab volume)
@@ -435,61 +478,110 @@ for i = 1:numel(fn)
         e.(fn{i}) = d.(fn{i});
     end
 end
-if e.enable && isempty(e.b1Dir)
-    e.b1Dir = findB1Dir(SessionDir);
-end
+% Session root, so extRefQuant31P can locate the *B1CALIB* series itself.
+e.sessionDir = SessionDir;
+
 if e.enable && isempty(e.isisDcm)
     e.isisDcm = findIsisDcm(SessionDir);
+end
+if e.enable && (isempty(e.brainMaskNii) || isempty(e.t1Nii))
+    anatDir = '';
+    if ~isempty(segTsv), anatDir = fileparts(segTsv); end
+    [mk, t1] = findAnatNii({anatDir, FinalOutDir});
+    if isempty(e.brainMaskNii), e.brainMaskNii = mk; end
+    if isempty(e.t1Nii),        e.t1Nii        = t1; end
+end
+end
+
+% =====================================================================
+function [maskNii, t1Nii] = findAnatNii(dirs)
+% HD-BET brain mask + the T1 it was derived from, as staged by Stage 1/1b of
+% processU01_Brain.ps1.  Both land in the same folder: during a live run that
+% is the staging dir segTsv points into; when this stage is re-run on its own
+% it is the session's processed\ dir, which Stage final copied them into.
+%
+% Without these there is no V_M at all and the external quant stops: the old
+% intensity-threshold head mask (skull and scalp included, ~790 mL against a
+% real brain-in-slab ~560 mL, so ~1.4x low) was removed with the rest of the
+% B1 mapping precisely because it failed silently.
+maskNii = ''; t1Nii = '';
+for k = 1:numel(dirs)
+    d = dirs{k};
+    if isempty(d) || ~isfolder(d), continue; end
+    m = dir(fullfile(d, '*_hdbet.nii.gz'));
+    if isempty(m), continue; end
+    cand = fullfile(m(1).folder, m(1).name);
+    % the T1 hd-bet ran on: same name minus the _hdbet suffix
+    stem = erase(m(1).name, '_hdbet.nii.gz');
+    t = dir(fullfile(d, [stem '.nii*']));
+    if isempty(t), continue; end          % a mask without its T1 is unusable
+    maskNii = cand;
+    t1Nii   = fullfile(t(1).folder, t(1).name);
+    return
 end
 end
 
 % =====================================================================
 function dcm = findIsisDcm(SessionDir)
-% One ISIS_SVS DICOM under SessionDir\E100 (defines the 31P VOI geometry).
+% One ISIS_SVS DICOM under any SessionDir\E* (defines the 31P VOI geometry).
+%
+% Searches every exam folder and skips *ISIS* series that exported with no
+% files -- that happens (S092_07082026), and taking the empty one would leave
+% V_M on the head-mask fallback with nothing in the log to say why.
 dcm = '';
-cand = dir(fullfile(SessionDir,'E100','*ISIS*'));
-cand = cand([cand.isdir]);
-if isempty(cand), return; end
-d = dir(fullfile(cand(1).folder, cand(1).name, '*'));
-d = d(~[d.isdir]);
-if ~isempty(d)
-    dcm = fullfile(d(1).folder, d(1).name);
+exams = dir(fullfile(SessionDir,'E*'));
+exams = exams([exams.isdir]);
+for k = 1:numel(exams)
+    cand = dir(fullfile(exams(k).folder, exams(k).name, '*ISIS*'));
+    cand = cand([cand.isdir]);
+    for j = 1:numel(cand)
+        d = dir(fullfile(cand(j).folder, cand(j).name, '*'));
+        d = d(~[d.isdir]);
+        if ~isempty(d)
+            dcm = fullfile(d(1).folder, d(1).name);
+            return
+        end
+    end
 end
+warning(['processU01_Brain_31P: no ISIS DICOM with any files under %s\\E* -- ' ...
+         'the external quant cannot intersect the brain mask with the slab and ' ...
+         'V_M falls back to the intensity-threshold head (~1.4x too large). ' ...
+         'Check absQ.external.V_M_source.'], SessionDir);
+end
+
+
+% =====================================================================
+function [Tus, ctrPpm, hzPerPpm] = acqExcGeom(hdr)
+% Excitation pulse duration (us), center (ppm) and Hz/ppm for THIS scan, from
+% the same WIP slots isis_svs_refVolt reads.  Any of them empty makes
+% extRefQuant31P fall back to the on-resonance sine (no profile term), so a
+% missing field degrades the correction rather than corrupting it.
+Tus = []; ctrPpm = []; hzPerPpm = [];
+try Tus    = wipEntry(hdr,'alFree', 6);  catch, end
+try ctrPpm = wipEntry(hdr,'adFree',11);  catch, end
+try hzPerPpm = double(hdr.MeasYaps.sTXSPEC.asNucleusInfo{1}.lFrequency) * 1e-6; catch, end
+if isempty(ctrPpm), ctrPpm = 0; end       % absent slot means centered, as on scanner
 end
 
 % =====================================================================
-function b1 = findB1Dir(SessionDir)
-% Locate the B1 map DICOM folder under SessionDir\E* (E100/E200/E300).
-% Returns '' when the session has no B1 scan -- that is NOT an error; the
-% external quant degrades to "RefExt fitted but not quantified" (see
-% extRefQuant31P) and the internal-reference quant is unaffected.
-%
-% Preference order matters: some sessions carry BOTH a 3D 1H TurboFLASH map
-% (PREP_TFL3D_B1MAP_10SLICES, the one we want) and a 3-file 31P MoCo map
-% (PREP_MOCO_B1MAP_31P), and plain alphabetical order picks the wrong one.
-b1 = '';
-exams = dir(fullfile(SessionDir,'E*'));
-exams = exams([exams.isdir]);
-cand  = [];
-for k = 1:numel(exams)
-    c = dir(fullfile(exams(k).folder, exams(k).name, '*B1MAP*'));
-    if ~isempty(c), cand = [cand; c(:)]; end %#ok<AGROW>
+function v = wipEntry(hdr, fld, idx)
+% One sWipMemBlock entry, empty cells read as 0 (matching dat2mat_svs31p).
+v = [];
+w = hdr.MeasYaps.sWipMemBlock.(fld);
+w(cellfun('isempty',w)) = {0};
+if numel(w) >= idx, v = double(w{idx}); end
 end
-if isempty(cand), return; end
-cand = cand([cand.isdir]);
-if isempty(cand), return; end
 
-names = {cand.name};
-% rank: TFL3D multi-slice > any other TFL > everything else (e.g. MOCO)
-score = zeros(numel(names),1);
-score(contains(names,'TFL','IgnoreCase',true))   = 1;
-score(contains(names,'TFL3D','IgnoreCase',true)) = 2;
-% tie-break by file count (more files = more slices x flip angles)
-nfile = zeros(numel(names),1);
-for k = 1:numel(names)
-    f = dir(fullfile(cand(k).folder, names{k}, '*'));
-    nfile(k) = sum(~[f.isdir]);
+% =====================================================================
+function bi = basisInfoOf(output)
+% Per-component chemical shifts from the basis fit, used to give every
+% metabolite its own excitation-profile factor.  Empty when the fit did not
+% carry basisInfo, which falls back to one tissue value for all of them.
+bi = [];
+try
+    if isfield(output,'basisVarproResults') && isfield(output.basisVarproResults,'basisInfo')
+        bi = output.basisVarproResults.basisInfo;
+    end
+catch
 end
-[~, ord] = sortrows([score nfile], [-1 -2]);
-b1 = fullfile(cand(ord(1)).folder, cand(ord(1)).name);
 end

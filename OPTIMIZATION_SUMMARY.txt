@@ -1,0 +1,448 @@
+NAD+ MRS Pipeline Optimization Summary
+=======================================
+
+This file now records TWO optimization campaigns on two different drivers.
+Read section 6 first if you are working on the brain downfield fit -- it is the
+current one, and it OVERTURNS parts of the April record below (lineshape kernel,
+Trp exclusion).  The April sections are kept because they are still authoritative
+for processRepeatability.m, a different driver / cohort / metric.
+
+  Sections 1-5 + order note : Apr 2026, processRepeatability.m
+                              (scan-rescan REPEATABILITY of NAD self-ratio)
+  Section 6                 : Jul 2026, processU01_Brain_1H.m
+                              (between-subject CV + NAD self-consistency vs
+                              time-domain HSVD "SpecTickle")
+
+Do not compare CV numbers across the two campaigns: April's ~3% is a
+same-subject scan-rescan CV; July's ~11-28% is between-DISTINCT-subject
+biological variance.  Different quantities.
+
+-----------------------------------------------------------------------------
+
+Date: 2026-04-14
+Scope: processRepeatability.m cohort (7 groups, all 9.7 ppm):
+       S004 sinc, S092 sinc, S092 U01, S139 sinc, S145 sinc, S076 U01, S138 U01
+Metric: mean CV(H2+H6 ratio-to-water) across 7 groups.
+Starting point (pre-optimization defaults): mean CV ~= 6-7%.
+
+
+1. BLOCK ALIGNMENT (pars.block_align)
+-------------------------------------
+Problem:  Time-domain alignment of averaged blocks was a no-op at block
+          size = 32 on this cohort (rPre == rPost to 7 decimals). Larger
+          block sizes let the TD fit converge, but TD was still inferior
+          to FD optimization restricted to the NAD+ region.
+
+Swept:    method {td, fd}, size {32, 64, 128}, FD ppmRange variants.
+
+Winner:   method='fd', size=64, Nfit=256, ppmRange=[8.5 10].
+          - FD alignment uses lsqcurvefit on concatenated real/imag
+            spectrum within a user-specified ppm window (new helper:
+            utils/fidfreqshift_fd.m).
+          - size=64 is optimal: size=32 is too noisy to fit, size=128
+            leaves only 2 blocks for Pilot-Sinc scans (256 averages).
+          - Restricting to [8.5 10] ppm avoids residual water/lipid
+            signals dominating the cost function.
+
+Defaults set in dat2mat_svsNAD.m:
+    pars.block_align.method   = 'fd'
+    pars.block_align.size     = 64
+    pars.block_align.Nfit     = 256
+    pars.block_align.ppmRange = [8.5 10]
+
+
+2. LINESHAPE KERNEL (pars.fit.lineShapeOpt)
+-------------------------------------------
+*** SUPERSEDED FOR BRAIN (processU01_Brain_1H.m): kernel is now DISABLED.
+*** Still enable=true for processRepeatability.m.  See section 6.2. ***
+
+Problem:  FD alignment didn't uniformly improve CV. S139 regressed
+          (1.62% under current settings) because the downstream Voigt
+          fit reacted badly to small shape perturbations that FD
+          alignment introduced. Root cause: kernel too narrow to
+          absorb asymmetric peak shape, so shape variance leaked
+          into peak-area estimates.
+
+Swept:    enable, asymmetric, nSide in {0,2,3,4,5,6}, maxSide in
+          {0.50, 0.75, 1.00}. Coarse + fine (11 conditions total).
+
+Winner:   enable=true, asymmetric=true, nSide=4, maxSide=0.50.
+          - nSide=4 is a clear plateau: all four nSide=4 configs
+            occupy the top 4 slots regardless of maxSide.
+          - nSide<4 underfits shape; nSide>4 starts overfitting.
+          - maxSide in [0.5, 1.0] is nearly indifferent at nSide=4
+            (delta <= 0.10 pp). 0.50 is marginally best.
+          - S139 regression fully resolved (1.62% -> 0.04%).
+          - S004 further improved (3.51% -> 2.53%).
+
+Defaults set in utils/curvefitAuto_varproBaseline.m (parseLineShapeOpt)
+and processRepeatability.m:
+    pars.fit.lineShapeOpt.enable     = true
+    pars.fit.lineShapeOpt.nSide      = 4
+    pars.fit.lineShapeOpt.asymmetric = true
+    pars.fit.lineShapeOpt.maxSide    = 0.50
+
+
+3. HSVD NUISANCE CLEANING (pars.fit.hsvdClean)
+----------------------------------------------
+Problem:  Pre-fit HSVD subtraction of out-of-range components was
+          actively hurting repeatability on this cohort. Increasing K
+          or tightening the preserve range caused catastrophic
+          scan-to-scan instability (some groups hit >20% CV).
+
+Swept:    enable {on, off}, K in {30, 60, 100, 150}, preserve range
+          in {[8.5 11], [8.7 11], [8.75 11], [8.75 12], [9.0 11]}.
+          10 conditions.
+
+Winner:   enable=false. Mean CV dropped 5.92% -> 5.14%.
+          - Residual RMS was LOWER (6/7 groups) with HSVD off -
+            the cleaning step was distorting the spectrum, not
+            removing nuisance.
+          - Aggressive cleaning (K=100, K=150) caused H6 CV > 30%
+            on S004/S145 - overmodeling absorbed signal whose
+            absorption flipped scan-to-scan.
+          - Tight preserve range [9.0 11] clipped the H4 region
+            (8.8-9.05) -> 26% mean CV.
+          - Runner-up [8.75 12] (5.41%) retained HSVD for edge
+            cases but was still worse than off.
+
+Defaults set in dat2mat_svsNAD.m and processRepeatability.m:
+    pars.fit.hsvdClean.enable = false
+    pars.fit.hsvdClean.K      = 60         (unused when disabled)
+    pars.fit.hsvdClean.range  = [8.75 12]  (used only if re-enabled)
+
+
+4. BASELINE SPLINE (pars.fit.baselineOpt)
+-----------------------------------------
+Problem:  Unknown whether the default amplitude L2 penalty on spline
+          coefficients (lambdaAmpl=0.1) was helping or hurting.
+
+Swept:    enable {on, off}, knotSpacing in {0.25, 0.5, 1, 2} (on a
+          1 ppm fit range [8.7 9.7]), lambda in {0, 1, 10, 100},
+          lambdaAmpl in {0, 0.1, 1}. 15 conditions (coarse + follow-up).
+
+Winner:   lambdaAmpl=0 (other settings unchanged).
+          Mean CV 5.14% -> 3.72%.
+          - The entire improvement came from removing lambdaAmpl.
+          - knotSpacing did NOT matter in [0.5, 2]: ks=0.5/1/2 all
+            produced identical CV (3.72%) and per-group values when
+            lambdaAmpl=0. On a 1 ppm fit range, all three yield only
+            2-3 knots so the spline basis is effectively the same.
+          - ks=0.25 overfits (5.85% at lambdaAmpl=0).
+          - lambda=1 is well-chosen. lambda=0 worsens slightly,
+            lambda>=10 is ruinous (>10%).
+          - Disabling baseline entirely is much worse (7.6%) and
+            gives ~10x higher residual RMS - the baseline is doing
+            real work modeling broad signal.
+
+Defaults set in processRepeatability.m (authoritative parseBaselineOpt
+default in utils/curvefitAuto_varproBaseline.m was already 0):
+    pars.fit.baselineOpt.enable      = true
+    pars.fit.baselineOpt.knotSpacing = 2
+    pars.fit.baselineOpt.lambda      = 1
+    pars.fit.baselineOpt.lambdaAmpl  = 0
+    pars.fit.baselineOpt.TolFun      = 1e-6
+
+
+CUMULATIVE IMPACT
+-----------------
+Starting point (TD/32, nSide=2, HSVD on K=60 [8.75 11], lambdaAmpl=0.1):
+    mean CV(H2+H6) ~ 6-7% across cohort, with some groups (S139)
+    actively regressing under alignment changes.
+
+Final defaults (FD/64/[8.5 10], nSide=4, HSVD off, lambdaAmpl=0,
+                ppm_range=[8.7 10.0], NAD+ 3 peaks only):
+    mean CV(H2+H6) = 3.12%.
+
+Per-group final CVs (H2+H6):
+    S004 sinc    :  1.20%
+    S092 sinc    :  1.47%
+    S092 U01     :  2.98%
+    S139 sinc    :  4.53%
+    S145 sinc    :  1.32%
+    S076 U01     :  6.30%  (3 scans)
+    S138 U01     :  4.04%  (4 scans; previously 10.87% -- this
+                            group is the largest beneficiary of
+                            the extended ppm_range)
+
+
+FILES MODIFIED
+--------------
+utils/curvefitAuto_varproBaseline.m
+    parseLineShapeOpt: defaults changed to enable=true, nSide=4,
+                       asymmetric=true.
+    (parseBaselineOpt lambdaAmpl default already 0.)
+
+dat2mat_svsNAD.m
+    block_align defaults: method='fd', size=64, ppmRange=[8.5 10].
+    hsvdClean range default: [8.75 12] (only applied if enabled).
+
+processRepeatability.m
+    Added OVR_* override hooks for block_align, lineshape, hsvd,
+    baseline (used by sweep runners).
+    Defaults updated to match the optimizations above.
+
+utils/fidfreqshift_fd.m  (NEW)
+    Frequency-domain analog of fidfreqshift; optimizes within
+    user-specified ppm range.
+
+
+SUPPORTING ANALYSIS SCRIPTS
+---------------------------
+run_blockavg_sweep.m              analyze_blockavg_sweep.m
+run_blockavg_sweep_64.m           analyze_blockavg_sweep_compare.m
+run_blockavg_sweep_128.m          analyze_blockavg_sweep_compare128.m
+run_lineshape_sweep.m             analyze_lineshape_sweep.m
+run_lineshape_sweep_fine.m        analyze_lineshape_sweep_fine.m
+run_hsvd_sweep.m                  analyze_hsvd_sweep.m
+run_baseline_sweep.m              analyze_baseline_sweep.m
+run_baseline_sweep_ks.m           analyze_baseline_sweep_ks.m
+run_range_trp_sweep.m             analyze_range_trp_sweep.m
+run_range_fine_sweep.m            analyze_range_fine_sweep.m
+plot_block_spectra_S004_S139.m    plot_block_residuals.m
+
+
+5. FIT PPM RANGE AND PEAK LIST (pars.fit.ppm_range, pars.peaks)
+---------------------------------------------------------------
+*** SUPERSEDED FOR BRAIN (processU01_Brain_1H.m): the "NAD+ 3 peaks only, no
+*** Trp" conclusion held only because Trp was forced to share one fit region
+*** and one lineshape kernel with NAD.  Brain now fits Trp in a SEPARATE
+*** region ([9.8 10.45]) with its own baseline, which removes the ~1.4 pp NAD
+*** penalty this section attributes to Trp.  See section 6.1. ***
+
+Problem:  The original fit range [8.7 9.7] ppm was tight around the
+          NAD+ H2/H6/H4 peaks. Unclear whether extending the window
+          (more baseline support) or adding a Trp model peak (~10.1
+          ppm) would help or hurt NAD+ repeatability.
+
+Swept:    Coarse: upper edges 9.7 -> 11.0, lower edges 8.5 / 8.7,
+          with/without Trp peak. 10 conditions.
+          Fine: upper edges 9.75..10.05 step 0.05 (lower fixed 8.70);
+          lower edges 8.60..8.90 step 0.05 (upper fixed 10.00).
+          13 conditions.
+
+Winner:   pars.fit.ppm_range = [8.70 10.00], NAD+ 3 peaks only.
+          Mean CV 3.72% -> 3.12%.
+          - Upper = 10.00 is a sharp local minimum. Moving +/-0.05
+            loses 1.8-2 pp. 10.00 sits just below Trp, extending
+            baseline support without pulling Trp signal in.
+          - Lower = 8.70 is also the sweet spot. Lower (8.60-8.65)
+            adds noise-only territory; higher (>=8.85) starts
+            clipping H4 (center ~8.93, range 8.8-9.05).
+          - Below 8.60 and at 8.90 the fit degrades sharply (~10%
+            and ~22% respectively).
+          - Adding a Trp peak costs ~1.4 pp in NAD+ CV by itself
+            (parameter correlation with the shared asymmetric
+            lineshape kernel and H4's tail). Trp inclusion fails
+            the "minimal loss" threshold, so the default peak list
+            stays NAD+ H2/H6/H4 only. If Trp is needed later, run
+            a separate fit with its own tuned range.
+
+Defaults set in processRepeatability.m:
+    pars.fit.ppm_range = [8.7 10.0]
+    pars.peaks.name    = {'NADH2','NADH6','NADH4'}
+    pars.peaks.range   = [9.25 9.45; 9.05 9.25; 8.8 9.05]
+
+
+OPTIMIZATION ORDER NOTE
+-----------------------
+Optimizations were applied sequentially; each sweep held previously-
+optimized parameters fixed. The order matters: the lineshape sweep
+exposed the FD-induced S139 regression (fixed by nSide=4), and the
+HSVD sweep assumed the nSide=4 lineshape. No interaction effects
+were re-checked at the end; a future full-factorial sweep could
+confirm the optimum is global, but the large per-parameter margins
+make this unlikely to change.
+
+
+=============================================================================
+6. BRAIN DOWNFIELD FIT  (processU01_Brain_1H.m)
+=============================================================================
+Date:   2026-07-23
+Scope:  12 DFS_CONTROL_STUDY control subjects (SXXX), 7T 1H downfield, 9.7 ppm
+        excitation.  Peaks: NADH2 ~9.35, NADH6 ~9.17, NADH4 ~8.84, Trp indole
+        NH ~10.1 ppm.
+Driver: processU01_Brain_1H.m.  Full per-parameter rationale, sweep tables and
+        rejected alternatives live in processU01_Brain_1H_NOTES.md; this is the
+        summary.
+Metric: (a) NAD SELF-CONSISTENCY -- H2/H6/H4 are single protons on one
+            molecule, so after relaxation correction their concentrations must
+            be equal; score = H6/H2 (and formerly H4/H2) vs 1.0.  This has a
+            physics-defined answer and is the primary tuning signal.
+        (b) between-subject CV of each peak.
+        (c) agreement with SpecTickle (time-domain HSVD).  CORROBORATION ONLY
+            -- there is NO gold standard for NAD quant, so SpecTickle agreement
+            is never used as an accuracy target, and section 6.1/6.5 show a
+            case where per-subject agreement is actively misleading.
+
+WHAT CHANGED FROM THE APRIL PIPELINE (this driver vs processRepeatability.m):
+  - Trp is now fit, in its own region             (6.1; overturns section 5)
+  - lineshape kernel OFF                           (6.2; overturns section 2)
+  - coarse VARPRO replaced by HSVD seeding         (6.3; new)
+  - soft HSVD width prior added                    (6.4; new)
+  - per-region baseline DOF set from data          (6.5; refines section 4)
+  - areasConv made phase-invariant                 (6.6; new, SETTLED)
+
+
+6.1  TWO-REGION FIT (Trp split out from NAD)
+--------------------------------------------
+Determination: fit two independent regions, each with its own coarse ->
+    phase -> fine pass (coarseMode 'perRegion'):
+        region 1 "NAD" : [8.7 10.0],  peaks NADH2/NADH6/NADH4
+        region 2 "Trp" : [9.8 10.45], peak  Trp
+Why:  a SINGLE wide region cannot serve both -- a baseline stiff enough to not
+      nibble the broad NADH4 peak inflates Trp ~2x, and one flexible enough for
+      Trp eats NADH4.  Splitting gives each its own baseline stiffness.  It also
+      keeps low-SNR Trp (longest lever arm) out of the NAD phase ramp, and gives
+      Trp a pure zeroth-order phase (single peak => pc1=0), which stopped Trp
+      railing at the +/-60 deg ph_range bound in 4/12 subjects.
+      This is why section 5's "adding Trp costs 1.4 pp of NAD CV" no longer
+      applies: that cost was Trp sharing NAD's region and kernel.
+Retired single-region alt ([8.7 10.3], all 4 peaks): H4/H2 = 2.44 vs 1.083
+      expected, Trp/H2 CV 45%.  Kept commented in the driver for A/B.
+Region-1 lower edge 8.7 not 8.6: the extra 0.1 ppm turns up into an unmodelled
+      ~8.5 ppm ATP2/adenine peak the stiff spline cannot follow, dumping misfit
+      onto NADH4.  Known cost: ~15% of NADH4's Lorentzian mass sits outside the
+      window (NADH4 is deprioritized -- may not be reported).
+
+
+6.2  LINESHAPE KERNEL -> OFF  (overturns section 2)
+---------------------------------------------------
+Determination: pars.fit.lineShapeOpt.enable = false.
+Why:  the shared kernel and the Voigt Gaussian width are collinear (both model
+      non-Lorentzian distortion), and the kernel was winning -- widthG sat
+      railed at its LOWER bound in 11/12 NADH2 fits and 8/12 NADH6 fits, i.e.
+      the Voigt's Gaussian term contributed nothing.  Large 7T voxels should
+      carry genuine Gaussian B0 character, so the Voigt is the physical model;
+      turning the kernel off lets widthG float.
+Section 2 (enable=true, nSide=4) was tuned on a DIFFERENT metric (scan-rescan
+      repeatability, not NAD self-consistency) and driver; it stands there.
+OPEN:  widthG STILL rails with the kernel off (18/36 NAD fits) => mode 5 (Voigt)
+      should drop to a pure LORENTZIAN.  Not yet actioned.
+      Kernel settings kept (disabled) in the driver for A/B tests.
+
+
+6.3  HSVD COARSE SEEDING  (new)
+-------------------------------
+Determination: replace the coarse VARPRO with an HSVD decomposition that seeds
+      peak position / width / phase and the first-order phase correction.
+      K=60, npts=1024 (SpecTickle defaults); accept windows from SpecTickle's
+      7T peak table (NAD 10-90 Hz, Trp 10-120 Hz); phaseTolDeg=100.
+Why:  the old coarse phase estimate was broken -- an unweighted polyfit through
+      4 peaks, dominated by low-SNR Trp at the longest lever arm, leaving a
+      ~74 deg/ppm residual ramp.  HSVD seeding + the perRegion split (6.1) cut
+      the worst-case residual phase across the 12 subjects from 90 to 34 deg.
+phaseTolDeg MATTERS: at the archived +/-180 (criterion off), our wider peak
+      windows admit inverted components -- e.g. S095 H6 seeded at -178 deg
+      (inverted) and wrecked the ramp; at +/-100 it lands at +37 deg.
+
+
+6.4  HSVD SOFT PRIORS  (new)
+----------------------------
+Determination: feed the HSVD linewidths back into the fine fit as a soft
+      PENALTY, not a hard cap:
+        pars.fit.baselineOpt.lambdaWidth = 0.3   (Voigt FWHM vs HSVD lw)
+        pars.fit.baselineOpt.lambdaPrior = 0.0   (baseline prior OFF)
+Why soft: a hard width cap pins the width on its bound and dumps the
+      discrepancy into the AMPLITUDE (the quantity of interest).  The 45 Hz Trp
+      cap tried first moved Trp from 2.9x SpecTickle to 3x BELOW it.
+Sweep (4x4 lambdaPrior x lambdaWidth, all 12, scored on mean|NAD ratio-1|):
+      - the WIDTH prior does nearly all the work and SATURATES: 0 -> 0.05 halves
+        mean|dev| (0.470 -> 0.209); 0.05..2.0 is flat.  0.3 sits mid-plateau.
+      - the BASELINE prior is HARMFUL and is OFF: HSVD's lw_max truncates broad
+        wings, so real peak signal sits in its "baseline"; pulling the spline
+        toward it hands peak area away (NADH4 CV -> 63-90%).  Hook kept for a
+        better baseline estimate (untruncated HSVD, or a measured MM spectrum).
+
+
+6.5  PER-REGION BASELINE DOF  (refines section 4)
+-------------------------------------------------
+Mechanics: knotSpacing is a SENTINEL, not a ppm spacing -- makeSplineBasis uses
+      nIntervals = max(2, round(width/knotSpacing)), and coef = nIntervals + 3.
+      knotSpacing=2 always floors to 2 intervals = 5 coefficients.
+
+Region 1 (NAD): knotSpacing 0.43 -> 3 intervals -> 6 COEFFICIENTS.
+      Set from the median flexibility SpecTickle's own unassigned HSVD
+      components need over [8.7 10.0] (analyze_spectickle_baseline.py).
+
+Region 2 (Trp): sentinel 2 -> 5 COEFFICIENTS.
+      A 6-coef variant (knotSpacing 0.22) was TRIED AND REJECTED:
+        - it wins on Trp-window residual (0.0094 vs 0.0127), BUT
+        - it puts an interior local MINIMUM in the baseline in 12/12 subjects,
+          ~0.10 ppm from the fitted Trp centre, ~18% of Trp peak height deep
+          (check_baseline_monotonicity.py).
+      That dip is physically inadmissible: inside 9.8-10.45 every baseline
+      contributor is centred BELOW the window, so a sum of absorption-mode
+      Lorentzian tails must be MONOTONE DECREASING.  The notch is the spline
+      digging under Trp so Trp can be larger -- peak/baseline degeneracy.  At
+      5 coef there is no interior minimum in any subject.
+      LESSON: a residual gain bought by an inadmissible baseline shape is
+      degeneracy absorbing mismatch, not model improvement; a physical
+      constraint violated 12/12 outranks a small residual gain.
+      DO NOT re-select region-2 DOF on Trp-window residual, and DO NOT re-select
+      on SpecTickle agreement: per-subject Trp:NADH2 correlates NEGATIVELY
+      between the pipelines (r = -0.79), so mean-level agreement is coincidental
+      (and swings on the single subject S095).
+
+
+6.6  PHASE-INVARIANT areasConv  (new -- SETTLED, do not reconsider)
+-------------------------------------------------------------------
+Determination: quantitation = magnitude of the complex amplitude, taken as the
+      frequency-domain area of the ZERO-PHASE model peak (kernel/Voigt shape
+      retained, per-peak phase block zeroed before integration).  Implemented in
+      utils/curvefitAuto_varproBaseline.m; consumed as output.met.fit.areasConv.
+Why:  the reported quantity must not depend on the fitted phase.  The old path
+      integrated real(component) with its fitted phase, scaling area by
+      cos(phase) -- a real bug that under-counted peaks carrying residual phase.
+Effect: Trp 0.196 -> 0.221 mM, NAD H6/H2 SD 0.105 -> 0.081, mean|dev|
+      0.201 -> 0.185.
+
+
+RELAXATION CONSTANTS
+--------------------
+NAD+ T1/T2 are literature (Swago 2025); NADH2 205.6/33.6 ms matches SpecTickle.
+Trp T1/T2 = 75/19 ms are PLACEHOLDERS matching SpecTickle for comparability,
+NOT finalised -- revisit before reporting absolute Trp.
+
+
+RESULTS AT THE CURRENT CONFIG (all 12 subjects)
+-----------------------------------------------
+    peak     conc (mM)   between-subj CV   vs SpecTickle
+    NADH2      0.402         11.4%             0.99x
+    NADH6      0.467         13.8%             1.04x
+    NADH4      0.384         28.3%             0.94x
+    Trp        0.221         19.4%             0.70x
+    H6/H2 self-consistency = 1.160 +/- 0.081   (SpecTickle 1.110 +/- 0.152)
+Every between-subject CV is lower than SpecTickle's (23.0 / 21.0 / 28.6 / 29.7).
+Absolute Trp carries a ~+/-27% Trp/macromolecule PARTITION band (0.20-0.35 mM);
+0.221 is the physically admissible (5-coef) end of it.  NADH2 is the primary
+reporting peak; NADH4 is deprioritized (may not be reported).
+
+
+OPEN ISSUES
+-----------
+  - widthG rails with the kernel off => mode 5 should become pure Lorentzian.
+  - Trp T1/T2 are placeholders.
+  - Per-subject concentrations correlate poorly with SpecTickle (NADH2 r=0.016;
+    Trp:NADH2 r=-0.79) -- at most one pipeline tracks real biology.  No age
+    effect survives in either (n=12, only 2 subjects >40 y).
+  - S167 is a clear failure (H6/H2=5.33, region-1 pc1 unwrapping-branch flip);
+    small phase residuals do NOT prove the ramp is right.
+  - Going below the 8.6 ppm region-1 edge needs an explicit ~8.52 ppm nuisance
+    peak first.
+
+
+FILES (Jul 2026)
+----------------
+Driver / notes:
+    processU01_Brain_1H.m
+    processU01_Brain_1H_NOTES.md      (full rationale, sweep tables)
+Shared fit code touched:
+    dat2mat_svsNAD.m                  (nadCoarsePhase HSVD seeding, priors wiring)
+    utils/curvefitAuto_varproBaseline.m (soft priors, phase-invariant areasConv)
+Analysis scripts (in DFS_CONTROL_STUDY, not this repo):
+    reprocess_second_fit.m            batch runner (second/second5/second6 stems)
+    compare_second_vs_spectickle.py   3-arm quant comparison
+    analyze_spectickle_baseline.py    baseline DOF census
+    check_baseline_monotonicity.py    region-2 dip test (6.5)
+    plot_fit_comparison.py            per-subject 3-panel decomposition figures

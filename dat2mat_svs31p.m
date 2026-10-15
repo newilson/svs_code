@@ -7,6 +7,7 @@ function [output,pars,fullHdr] = dat2mat_svs31p(pars,dat_file)
 % filtering
 % hsvd denoising
 % backwards linear prediction
+% leading-point removal (pars.dropPts)
 % Fourier Transform
 % phase correction
 % baseline correction
@@ -30,6 +31,9 @@ if ~isfield(pars,'zf') || isempty(pars.zf), pars.zf = false; end
 if ~isfield(pars,'peaks'), pars.peaks = [0 5]; end % PCr, Pi
 if ~isfield(pars,'peakRanges'), pars.peakRanges = []; end
 if ~isfield(pars,'peakAddLB'), pars.peakAddLB = 3; end
+if ~isfield(pars,'phasePeaks'), pars.phasePeaks = []; end % ppm; empty = pars.peaks
+if ~isfield(pars,'phasePeakRanges'), pars.phasePeakRanges = []; end
+if ~isfield(pars,'phaseOrder') || isempty(pars.phaseOrder), pars.phaseOrder = 1; end % 0 | 1
 if ~isfield(pars,'PC'), pars.PC = 0; end
 if ~isfield(pars,'base'), pars.base = nan; end
 if ~isfield(pars,'hsvd') || ~isfield(pars.hsvd,'flag'), pars.hsvd.flag = false; end
@@ -38,9 +42,12 @@ if ~isfield(pars.hsvd,'cad'), pars.hsvd.cad = 3; end % HSVD Cadzow iterations
 if ~isfield(pars,'dofit'), pars.dofit = false; end
 if ~isfield(pars,'blp'), pars.blp.flag = false; end % backwards linear prediction for TE delay
 if ~isfield(pars.blp,'modelOrder'), pars.blp.modelOrder = 0; end % auto select
+if ~isfield(pars,'dropPts') || isempty(pars.dropPts), pars.dropPts = 0; end % leading FID points discarded
 if ~isfield(pars,'block_align') || ~isfield(pars.block_align,'size'),   pars.block_align.size = 64; end
 if ~isfield(pars,'block_align') || ~isfield(pars.block_align,'method'), pars.block_align.method = 'fd'; end % 'td' (fidfreqshift) or 'fd' (fidfreqshift_fd)
 if ~isfield(pars.block_align,'Nfit'),     pars.block_align.Nfit = 256; end       % TD: # FID points fit
+if ~isfield(pars,'csd') || ~isfield(pars.csd,'flag'), pars.csd.flag = true; end  % chemical shift displacement report
+if ~isfield(pars.csd,'bwIdx'), pars.csd.bwIdx = 3; end                           % adFree: ISIS inversion BW (Hz)
 if pars.dofit
     if ~isfield(pars.fit,'mode'), pars.fit.mode = 2; end % complex Lorentzian
 end
@@ -92,6 +99,20 @@ wipdbl = twix_obj.hdr.MeasYaps.sWipMemBlock.adFree;
 empInd = cellfun('isempty',wipdbl);
 wipdbl(empInd) = {0};
 wipdbl = cell2mat(wipdbl);
+
+% chemical shift displacement from the ISIS inversion bandwidth
+if pars.csd.flag && numel(wipdbl)>=pars.csd.bwIdx && wipdbl(pars.csd.bwIdx)>0 && ...
+        isfield(fullHdr.MeasYaps.sSpecPara,'sVoI') && ...
+        isfield(fullHdr.MeasYaps.sSpecPara.sVoI,'dThickness')
+    isisBW = wipdbl(pars.csd.bwIdx);
+    thk    = fullHdr.MeasYaps.sSpecPara.sVoI.dThickness;
+    csdPerPpm = f0/isisBW*thk;
+    fprintf('chemical shift displacement: %.2f mm/ppm = %.1f%% of the %g mm slab per ppm (ISIS BW %g Hz)\n', ...
+        csdPerPpm, 100*csdPerPpm/thk, thk, isisBW);
+    output.csd.perPpm_mm = csdPerPpm;
+    output.csd.isisBW    = isisBW;
+    output.csd.thickness = thk;
+end
 
 fid = twix_obj.image{''};
 
@@ -181,12 +202,20 @@ end
 % output fid pre backwards linear prediction
 output.rawfid = fid;
 
+tFirst = TEus * 1e-6; % time of fid(1) after the excitation pulse center (s)
 if pars.blp.flag
     % Correct for TE delay
     TEs = TEus * 1e-6;
     nPredict = round(TEs/(1/bw)); % points to backwards predict
     fid = blp_fid(fid,nPredict,pars.blp.modelOrder);
+    tFirst = TEs - nPredict/bw;
 end
+if pars.dropPts > 0
+    fid = [fid(pars.dropPts+1:end,:); zeros(pars.dropPts,size(fid,2))];
+    tFirst = tFirst + pars.dropPts/bw;
+end
+output.tFirst = tFirst;
+delayPhase = @(pp) 2*pi*(pp - adcshift)*f0*tFirst; % phase (rad) each point carries from tFirst
 
 
 % Fourier Transform
@@ -215,19 +244,30 @@ if ~isempty(pars.peaks)
             zpsh(jj) = ppm(ind(1)-1+zpind) - peaks(jj);
         end
         hzshift(ii) = mean(zpsh)*f0;
-        spec(:,ii) = shiftSpectrumFrequency(spec(:,ii),hzshift(ii),t);
+        spec(:,ii) = shiftSpectrumFrequency(spec(:,ii),hzshift(ii),t + tFirst);
     end
     for ii=1:length(hzshift)
         disp(['      freq shift: ' num2str(hzshift(ii)) ' hz'])
     end
 
     disp('peak-based phase correction')
-    % recompute line-broadened spectrum after frequency correction
-    speclb = fftshift(fft(fidlb,[],1),1);
+    % line-broadened, zero-filled spectrum after frequency correction
+    zfPhase = 16;
+    nZ = zfPhase*npts;
+    fidlb = expFilter(t,addlb,ifft(ifftshift(spec,1),[],1));
+    speclb = fftshift(fft(fidlb,nZ,1),1);
     specmag = abs(speclb);
+    ppmZ = (-1/2:1/nZ:1/2-1/nZ)*bw/f0 + adcshift;
 
-    npeaks = length(peaks);
-    if npeaks>1
+    phPeaks  = peaks;
+    phRanges = ranges;
+    if ~isempty(pars.phasePeaks)
+        phPeaks  = pars.phasePeaks;
+        phRanges = pars.phasePeakRanges;
+        if isempty(phRanges), phRanges = 0.5*ones(numel(phPeaks),2); end
+    end
+    npeaks = length(phPeaks);
+    if npeaks>1 && pars.phaseOrder==1
         ph = zeros(size(spec));
     else
         ph = zeros(1,size(specmag,2));
@@ -236,7 +276,7 @@ if ~isempty(pars.peaks)
         peakphs = zeros(npeaks,1);
         peakinds = zeros(npeaks,1);
         for jj=1:npeaks
-            ind = find(ppm > (peaks(jj)-ranges(jj,1)/2) & ppm < (peaks(jj)+ranges(jj,2)/2));
+            ind = find(ppmZ > (phPeaks(jj)-phRanges(jj,1)/2) & ppmZ < (phPeaks(jj)+phRanges(jj,2)/2));
             [~,maxind] = findpeaks(specmag(ind,ii),'SortStr','descend','NPeaks',1);
             if isempty(maxind)
                 [~,maxind] = max(specmag(ind,ii));
@@ -245,18 +285,20 @@ if ~isempty(pars.peaks)
             peakphs(jj) = angle(speclb(peakinds(jj),ii));
         end
         peakphs = unwrap(peakphs);
-        if npeaks==1
-            ph(ii) = peakphs;
+        peakppm = reshape(ppmZ(peakinds),[],1);
+        delayph = delayPhase(peakppm); % kept in the data
+        if pars.phaseOrder==0 || npeaks==1
+            ph(ii) = angle(mean(exp(1i*(peakphs - delayph))));
         else
-            p = polyfit(peakinds,peakphs,1);
-            ph(:,ii) = polyval(p,(1:npts)');
+            p = polyfit(peakppm,unwrap(angle(exp(1i*(peakphs - delayph)))),1);
+            ph(:,ii) = polyval(p,ppm(:));
         end
+        output.phase.peakphs(:,ii) = peakphs;
+        output.phase.peakppm(:,ii) = peakppm;
+        output.phase.delayph(:,ii) = delayph;
     end
+    output.phase.ph = ph;
     spec = shiftSpectrumPhase(spec,ph);
-
-    if pars.plt
-        figure('Name','31P after peak-based correction'), plot(ppm,real(sum(spec(:,:),2))), title('after peak-based correction'), set(gca,'xdir','reverse')
-    end
 end
 
 % phase correction
@@ -274,6 +316,10 @@ elseif isstruct(pars.PC)
         pars.PC.pivot = 0;
     end
     spec = shiftSpectrumPhase(spec,[pars.PC.pc0 pars.PC.pc1],ppm,pars.PC.pivot);
+end
+
+if pars.plt
+    figure('Name','31P after peak-based correction'), plot(ppm,real(sum(spec(:,:),2).*exp(-1i*delayPhase(ppm(:))))), title('after peak-based correction'), set(gca,'xdir','reverse')
 end
 
 
@@ -348,16 +394,28 @@ if pars.dofit
             pars.fit.tieGroups = [];
         end
 
-        % build basis FIDs at data length / dwell
-        basisArgs = {'metabSubset', pars.fit.metabs, 'adcshift', adcshift};
-        if isfield(pars.fit,'refExtPpm') && ~isempty(pars.fit.refExtPpm)
-            basisArgs = [basisArgs, {'refExtPpm', pars.fit.refExtPpm}];
-        end
-        [basisFIDs, basisInfo] = make31P_basisFIDs(t(:), f0, basisArgs{:});
-
         % fit input: prefer first-spectrum column for now
         x = ppm(:);
         y = double(spec(:,1));
+
+        % build basis FIDs at data length / dwell
+        basisArgs = {'metabSubset', pars.fit.metabs, 'adcshift', adcshift};
+        if any(strcmp(pars.fit.metabs,'RefExt'))
+            refExtNominal = 8;
+            if isfield(pars.fit,'refExtPpm') && ~isempty(pars.fit.refExtPpm)
+                refExtNominal = pars.fit.refExtPpm;
+            end
+            output.refExtLine = locateRefExtLine31P(x, y .* exp(-1i*delayPhase(x)), refExtNominal);
+            if output.refExtLine.found
+                fprintf('RefExt line located at %.2f ppm (SNR %.1f)\n', output.refExtLine.ppm, output.refExtLine.snr);
+            else
+                fprintf('RefExt line NOT found (best %.2f ppm, SNR %.1f); RefExt kept at %.2f ppm\n', ...
+                    output.refExtLine.ppmFound, output.refExtLine.snr, output.refExtLine.ppm);
+            end
+            basisArgs = [basisArgs, {'refExtPpm', output.refExtLine.ppm}];
+        end
+        [basisFIDs, basisInfo] = make31P_basisFIDs(t(:) + tFirst, f0, basisArgs{:});
+        basisFIDs(end-pars.dropPts+1:end,:) = 0;
 
         % normalize to unit max within the fit window so penalty knobs
         % (softConstraints lambda, baseline lambda, lambdaAmpl) behave
@@ -388,8 +446,9 @@ if pars.dofit
         timeInfo = struct( ...
             'dwellTime', 1/bw, ...
             'f0',        f0, ...
-            't',         t(:), ...
-            'ppmPivot',  ppmPivot);
+            't',         t(:) + tFirst, ...
+            'ppmPivot',  ppmPivot, ...
+            'delayPhase', delayPhase);
 
         fitOpt = struct();
         fitOpt.fitRange       = pars.fit.ppm_range;
@@ -419,6 +478,7 @@ if pars.dofit
         baselineOpt.style       = 'lcmodel';
         baselineOpt.knotSpacing = 1.5;        % ppm
         baselineOpt.lambda      = 1e-2;
+        baselineOpt.causal      = true;
         if isfield(pars.fit,'baselineOpt') && isstruct(pars.fit.baselineOpt)
             fn = fieldnames(pars.fit.baselineOpt);
             for ii_fn = 1:numel(fn)
@@ -474,6 +534,10 @@ if pars.dofit
         end
         if outFit.fitOpt.phase1Enable
             fprintf('  global phi1 = %+5.2f deg/ppm\n', outFit.pars.phase1);
+        end
+        if isfield(outFit,'multiStart')
+            fprintf('  best of %d starts: start %d (cost / best: %s)\n', numel(outFit.multiStart.cost), ...
+                outFit.multiStart.best, mat2str(round(outFit.multiStart.cost/min(outFit.multiStart.cost),3)));
         end
 
         % --- totals (n-scaled, i.e., concentration-proportional)
@@ -537,8 +601,8 @@ if pars.dofit
         % debug_pk;
 
         % Fit
-        % beginTime = time from pulse centroid to first ADC sample (s)
-        beginTime = TEus * 1e-6;
+        % beginTime = time from pulse centroid to the first FID point (s)
+        beginTime = tFirst;
 
         % --- Stage 1: Fit major peaks with basic PK ---
         PK1 = AMARES.priorKnowledge.PK_7T_31P_Basic_NW();

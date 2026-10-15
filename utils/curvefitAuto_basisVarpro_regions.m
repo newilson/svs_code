@@ -58,7 +58,7 @@ function output = curvefitAuto_basisVarpro_regions(x, y, basisFIDs, basisInfo, t
 %   .regionRanges  - [R x 2] fit ranges
 %   .timeInfo, .sharedOpt, .regionsSpec - echoes of inputs
 %
-% Single-region behaviour is unchanged: to fit one window, call
+% Single-region behavior is unchanged: to fit one window, call
 % curvefitAuto_basisVarpro directly.  This wrapper never edits or bypasses
 % it - it only loops it.
 %

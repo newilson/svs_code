@@ -63,7 +63,7 @@ function output = curvefitAuto_varproBaseline_regions(x, y, peakTable, regions, 
 %   .regionRanges  - [R x 2] fit ranges
 %   .peakTable, .sharedOpt, .regionsSpec - echoes of inputs
 %
-% Single-region behaviour is unchanged: to fit one window, call
+% Single-region behavior is unchanged: to fit one window, call
 % curvefitAuto_varproBaseline directly.  This wrapper only loops it.
 %
 % NW - 05/2026

@@ -1,0 +1,452 @@
+================================================================================
+HOW-TO: Wire a Windows host to a VirtualBox Ubuntu VM over SSH
+         (the connection used by processU01_Brain.ps1 -> Invoke-Vm)
+================================================================================
+
+Audience : Anyone who needs to recreate, on a fresh Windows machine, the SSH +
+           shared-folder link that lets the U01 SVS PowerShell pipeline run
+           brainseg.sh (FSL) inside an Ubuntu VirtualBox guest.
+
+Goal     : From a PowerShell prompt on Windows, be able to type
+
+               ssh ubuntu-vm 'some linux command'
+
+           and have it run, with NO password prompt, inside the Ubuntu VM, AND
+           be able to hand files to/from the VM through a shared folder.
+
+Read time: ~15 min. Setup time: ~30-45 min on a fresh machine.
+
+
+================================================================================
+0.  THE BIG PICTURE  (read this first -- it removes most of the confusion)
+================================================================================
+
+Nothing in the PowerShell script contains an IP address. The script only knows
+the VM by a nickname, "ubuntu-vm". Three layers turn that nickname into an
+actual running command inside Linux:
+
+   processU01_Brain.ps1
+        |  calls:  ssh ubuntu-vm "bash -lc '...'"
+        v
+   ~/.ssh/config on Windows         <-- defines the nickname "ubuntu-vm"
+        |  says:  ubuntu-vm = 127.0.0.1, port 2222, user camipm
+        v
+   127.0.0.1 : 2222  (your OWN machine, loopback)
+        |
+        v
+   VirtualBox NAT "port-forward" rule
+        |  says:  anything hitting host 127.0.0.1:2222 -> guest port 22
+        v
+   sshd (SSH server) running inside the Ubuntu VM, port 22
+        |
+        v
+   your command runs as user "camipm" in Linux
+
+
+KEY INSIGHT (this is what confused us before):
+   The connection target is 127.0.0.1 -- your own computer's loopback address.
+   The VM runs LOCALLY inside VirtualBox on this same Windows box. The traffic
+   never goes out onto the network. So the IP address of any external server,
+   or the network the machine is plugged into, is IRRELEVANT to this SSH path.
+   That is why re-adding the VM (after a server IP change) did not require any
+   change to the PowerShell code.
+
+   The only things a VM re-add CAN break are the two VirtualBox-side settings:
+       (a) the NAT port-forward rule (host 2222 -> guest 22), and
+       (b) the shared-folder definition.
+   Section 6 explains how to check and restore those.
+
+Files are exchanged through a SEPARATE mechanism -- a VirtualBox "shared
+folder" -- not through SSH. A folder on Windows is made visible inside Linux:
+
+   C:\Users\<you>\Documents\VirtualBoxSharedFolders\CAMIPM_Ubuntu_VM2\   (Windows)
+            is the SAME folder as
+   /media/sf_CAMIPM_Ubuntu_VM2/                                          (Linux)
+
+The pipeline stages NIfTI files into the Windows side; brainseg.sh in the VM
+reads/writes them on the Linux side; the pipeline copies results back.
+
+
+================================================================================
+1.  VALUES USED IN THIS SETUP  (substitute your own where noted)
+================================================================================
+
+You can keep these exact values to match the existing pipeline, or change them.
+If you change any value, you must change it consistently in every place listed
+in the "Used in" column.
+
+  Setting                  This machine's value                         Used in
+  ----------------------   ------------------------------------------   --------
+  SSH nickname/alias       ubuntu-vm                                    ~/.ssh/config,
+                                                                        $vmHost in .ps1
+  Host (loopback) port     2222                                         ~/.ssh/config,
+                                                                        VBox port-forward
+  Guest SSH port           22  (Linux default)                         VBox port-forward
+  Guest Linux username     camipm                                       ~/.ssh/config,
+                                                                        authorized_keys
+  VirtualBox VM name       CAMIPM_Ubuntu_VM2                            VBoxManage cmds
+  Guest hostname           CAMIPM-Ubuntu-VM2  (cosmetic)                --
+  Shared-folder NAME       CAMIPM_Ubuntu_VM2                            VBox shared folder
+  Shared-folder HOST path  C:\Users\CAMIPM-NW\Documents\
+                           VirtualBoxSharedFolders\CAMIPM_Ubuntu_VM2    VBox shared folder,
+                                                                        $StagingRoot in .ps1
+  Shared-folder GUEST path /media/sf_CAMIPM_Ubuntu_VM2                  $PathMap in .ps1
+  VBoxManage.exe           C:\Program Files\Oracle\VirtualBox\          (admin commands)
+                           VBoxManage.exe
+
+NOTE on the guest mount path: VirtualBox auto-mount always uses the prefix
+"sf_" plus the shared-folder NAME. So shared-folder name "CAMIPM_Ubuntu_VM2"
+auto-mounts at "/media/sf_CAMIPM_Ubuntu_VM2". If you rename the share, the
+Linux path changes too, and you must update $PathMap in processU01_Brain.ps1.
+
+
+================================================================================
+2.  PREREQUISITES
+================================================================================
+
+On the Windows host:
+  [ ] Oracle VirtualBox installed (gives you VBoxManage.exe).
+  [ ] The OpenSSH CLIENT (provides ssh.exe, ssh-keygen.exe). Windows 10/11
+      usually include it. Verify in PowerShell:
+            ssh -V
+      If "ssh is not recognized", install it (Admin PowerShell):
+            Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
+  [ ] An Ubuntu VM already created/imported in VirtualBox (or install one).
+
+On the Ubuntu guest:
+  [ ] You can log in (console or VirtualBox window) and have sudo rights.
+
+You do NOT need the Windows OpenSSH *Server*. We only use the client. (We even
+verified no Windows sshd is running -- it would clash with port 2222.)
+
+
+================================================================================
+3.  STEP-BY-STEP SETUP
+================================================================================
+
+--------------------------------------------------------------------------------
+PART A -- Ubuntu guest: install and enable the SSH server
+--------------------------------------------------------------------------------
+Run these INSIDE the VM (VirtualBox console window or an existing terminal):
+
+    sudo apt update
+    sudo apt install -y openssh-server
+    sudo systemctl enable --now ssh        # start now AND on every boot
+    systemctl status ssh                   # should show: active (running)
+
+Leave the SSH port at the default 22 (the port-forward in Part B maps to 22).
+Confirm there is no custom Port line (blank output = default 22 is fine):
+
+    grep -E '^\s*Port' /etc/ssh/sshd_config || echo 'default port 22'
+
+WHY "enable": without it, sshd only runs until the next reboot and your scripts
+silently fail to connect after a restart.
+
+--------------------------------------------------------------------------------
+PART B -- VirtualBox: NAT networking + SSH port-forward (host 2222 -> guest 22)
+--------------------------------------------------------------------------------
+The VM's network adapter 1 must be "NAT", and it needs a port-forward rule so
+that host 127.0.0.1:2222 reaches the guest's sshd on port 22.
+
+OPTION B1 -- VirtualBox GUI:
+    1. Select the VM (do not start it) > Settings > Network > Adapter 1.
+    2. "Attached to:"  =  NAT.
+    3. Click "Advanced" > "Port Forwarding".
+    4. Add a rule:
+           Name = SSH
+           Protocol = TCP
+           Host IP = 127.0.0.1     Host Port = 2222
+           Guest IP = (leave blank) Guest Port = 22
+    5. OK / OK.
+
+OPTION B2 -- VBoxManage (command line; reproducible, good for documentation).
+Open PowerShell. Use the full path if VBoxManage is not on PATH:
+
+    $vbm = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+
+    # If the VM is POWERED OFF:
+    & $vbm modifyvm "CAMIPM_Ubuntu_VM2" --natpf1 "SSH,tcp,127.0.0.1,2222,,22"
+
+    # If the VM is RUNNING (apply live, no reboot):
+    & $vbm controlvm "CAMIPM_Ubuntu_VM2" natpf1 "SSH,tcp,127.0.0.1,2222,,22"
+
+The rule string fields are:  Name,Protocol,HostIP,HostPort,GuestIP,GuestPort
+(the empty slot between 2222 and 22 is the blank Guest IP).
+
+Verify the rule exists:
+
+    & $vbm showvminfo "CAMIPM_Ubuntu_VM2" --machinereadable |
+        Select-String Forwarding
+    # Expect: Forwarding(0)="SSH,tcp,127.0.0.1,2222,,22"
+
+To delete a stale/duplicate rule before re-adding:
+    & $vbm modifyvm "CAMIPM_Ubuntu_VM2" --natpf1 delete "SSH"     # powered off
+    & $vbm controlvm "CAMIPM_Ubuntu_VM2" natpf1 delete "SSH"      # running
+
+--------------------------------------------------------------------------------
+PART C -- VirtualBox: create the shared folder (for file exchange)
+--------------------------------------------------------------------------------
+First make the folder on Windows (PowerShell):
+
+    New-Item -ItemType Directory -Force `
+      -Path "C:\Users\CAMIPM-NW\Documents\VirtualBoxSharedFolders\CAMIPM_Ubuntu_VM2"
+
+OPTION C1 -- VirtualBox GUI:
+    VM > Settings > Shared Folders > add (folder+ icon):
+        Folder Path = C:\Users\CAMIPM-NW\Documents\VirtualBoxSharedFolders\CAMIPM_Ubuntu_VM2
+        Folder Name = CAMIPM_Ubuntu_VM2          <-- becomes /media/sf_<name>
+        [x] Auto-mount
+        [ ] Read-only  (leave UNchecked -- the VM must write results back)
+        Mount point   = (leave blank; auto-mount picks /media/sf_<name>)
+
+OPTION C2 -- VBoxManage (VM powered off):
+
+    & $vbm sharedfolder add "CAMIPM_Ubuntu_VM2" `
+        --name "CAMIPM_Ubuntu_VM2" `
+        --hostpath "C:\Users\CAMIPM-NW\Documents\VirtualBoxSharedFolders\CAMIPM_Ubuntu_VM2" `
+        --automount
+
+Verify:
+    & $vbm showvminfo "CAMIPM_Ubuntu_VM2" --machinereadable |
+        Select-String SharedFolder
+
+--------------------------------------------------------------------------------
+PART D -- Ubuntu guest: Guest Additions + permission to read the share
+--------------------------------------------------------------------------------
+Shared folders require VirtualBox Guest Additions in the guest, and your Linux
+user must belong to the "vboxsf" group to access the mount.
+
+INSIDE the VM:
+
+    # 1. Guest Additions (one-time). Easiest via the distro package:
+    sudo apt update
+    sudo apt install -y virtualbox-guest-utils
+    #   (If shared folders still don't appear, instead use the VirtualBox menu
+    #    "Devices > Insert Guest Additions CD image..." and run the installer,
+    #    then reboot.)
+
+    # 2. Add your user to the vboxsf group so you can read/write the mount:
+    sudo usermod -aG vboxsf camipm
+
+    # 3. Reboot the guest so the group membership and auto-mount take effect:
+    sudo reboot
+
+After reboot, confirm (INSIDE the VM):
+
+    groups                       # should include: vboxsf
+    mount | grep vboxsf          # CAMIPM_Ubuntu_VM2 on /media/sf_CAMIPM_Ubuntu_VM2 type vboxsf
+    ls -la /media/sf_CAMIPM_Ubuntu_VM2
+
+--------------------------------------------------------------------------------
+PART E -- Windows: define the "ubuntu-vm" SSH alias
+--------------------------------------------------------------------------------
+Create (or edit) the file  C:\Users\<you>\.ssh\config  with NO file extension.
+PowerShell to create the .ssh dir and write the alias:
+
+    New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.ssh" | Out-Null
+
+    @"
+Host ubuntu-vm
+    HostName 127.0.0.1
+    Port 2222
+    User camipm
+"@ | Set-Content -Encoding ascii "$env:USERPROFILE\.ssh\config"
+
+Field meanings:
+    Host ubuntu-vm   the nickname you type after "ssh"
+    HostName         127.0.0.1 = this machine's loopback (the VBox forward)
+    Port             2222 = the host-side port from the port-forward rule
+    User             the Linux username inside the VM
+
+That is the ENTIRE Windows-side configuration. The pipeline's $vmHost = 'ubuntu-vm'
+matches the "Host" line here.
+
+--------------------------------------------------------------------------------
+PART F -- Passwordless login with an SSH key (required for the script)
+--------------------------------------------------------------------------------
+The pipeline runs SSH non-interactively, so it cannot type a password. We use
+public-key authentication: a private key stays on Windows, its matching public
+key is trusted by the VM.
+
+STEP F1 -- generate a key on Windows (PowerShell), if you don't have one:
+
+    ssh-keygen -t ed25519 -C "u01-pipeline"
+    #  Accept the default path  C:\Users\<you>\.ssh\id_ed25519
+    #  Passphrase: press Enter for none if this key is ONLY for the local VM and
+    #  you need fully unattended scripts. (A passphrase is more secure but then
+    #  scripts must use ssh-agent; see note below.)
+
+The default key (id_ed25519 / id_rsa) is tried automatically, so you do NOT need
+an IdentityFile line in ~/.ssh/config.
+
+STEP F2 -- copy the PUBLIC key into the VM's authorized_keys.
+Windows has no ssh-copy-id, so push it over SSH (this one time it WILL ask for
+the camipm password):
+
+    Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub" |
+        ssh ubuntu-vm 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys'
+
+STEP F3 -- test passwordless login (should NOT prompt for a password):
+
+    ssh -o BatchMode=yes ubuntu-vm 'echo OK from $(hostname)'
+    # BatchMode=yes disables password prompts, so if this prints "OK from ..."
+    # then key auth is working. If it errors instead, the key is not installed
+    # correctly -- see Troubleshooting (CRLF is the usual culprit on Windows).
+
+SECURITY NOTE: a passphrase-less key is a convenience/risk tradeoff. It is
+acceptable here because the target is a LOCAL loopback-only VM and the key
+grants access only to that VM's "camipm" account. For a passphrase-protected
+key, load it once per session into the agent:
+    Start-Service ssh-agent ; ssh-add "$env:USERPROFILE\.ssh\id_ed25519"
+
+--------------------------------------------------------------------------------
+PART G -- Verify the whole chain end-to-end
+--------------------------------------------------------------------------------
+Run these from PowerShell on the host. Expected results in <>.
+
+  1. Right process owns the host port (NOT a stray Windows sshd):
+        Get-NetTCPConnection -LocalPort 2222 -State Listen |
+          ForEach-Object { (Get-Process -Id $_.OwningProcess).ProcessName }
+        # <VirtualBoxVM>
+
+  2. You actually land in the LINUX VM (note the SINGLE quotes -- see gotcha #1):
+        ssh -o BatchMode=yes ubuntu-vm 'echo VMHOST=$(hostname) USER=$(whoami) OS=$(uname -sr)'
+        # <VMHOST=CAMIPM-Ubuntu-VM2 USER=camipm OS=Linux 6.8.x-...>
+
+  3. The pipeline's actual dependencies are reachable in a LOGIN shell:
+        ssh ubuntu-vm 'bash -lc "command -v brainseg.sh"'
+        # </home/camipm/Documents/Elliott-Scripts/brainseg.sh>
+        ssh ubuntu-vm 'echo FSLDIR is $FSLDIR'         # <FSLDIR is /opt/fsl>
+
+  4. The shared folder round-trips. Drop a file on Windows, read it in Linux:
+        "hello" | Set-Content "C:\Users\CAMIPM-NW\Documents\VirtualBoxSharedFolders\CAMIPM_Ubuntu_VM2\ping.txt"
+        ssh ubuntu-vm 'cat /media/sf_CAMIPM_Ubuntu_VM2/ping.txt'    # <hello>
+
+If all four pass, processU01_Brain.ps1 will run its VM stages unchanged.
+
+
+================================================================================
+4.  HOW THE PIPELINE USES ALL THIS  (mapping back to processU01_Brain.ps1)
+================================================================================
+
+  $vmHost = 'ubuntu-vm'                 -> matches "Host ubuntu-vm" in ~/.ssh/config
+
+  function Invoke-Vm([string]$Cmd) {
+      ssh $vmHost "bash -lc '$Cmd'"     -> ssh ubuntu-vm "bash -lc '...'"
+  }                                        "bash -lc" = LOGIN shell, so the VM's
+                                           PATH (brainseg.sh) and FSLDIR are set.
+
+  $StagingRoot = 'C:\Users\CAMIPM-NW\Documents\VirtualBoxSharedFolders\
+                  CAMIPM_Ubuntu_VM2\TEMP'
+        -> the HOST side of the shared folder; the pipeline writes inputs here.
+
+  $PathMap = @{ 'C:\...\CAMIPM_Ubuntu_VM2\' = '/media/sf_CAMIPM_Ubuntu_VM2/' }
+  Convert-ToVmPath()
+        -> rewrites a Windows staging path into the matching Linux mount path,
+           so the SAME file can be named for brainseg.sh inside the VM.
+
+So the pipeline: stages files into the shared folder on Windows, SSHes in and
+runs brainseg.sh against the /media/sf_... copies, then copies results back out.
+
+
+================================================================================
+5.  TROUBLESHOOTING  (including the exact traps we hit)
+================================================================================
+
+GOTCHA #1 -- PowerShell expands $(...) LOCALLY if you use DOUBLE quotes.
+   WRONG:  ssh ubuntu-vm "echo $(whoami) on $(hostname)"
+           PowerShell runs whoami/hostname on WINDOWS first, then sends the
+           already-filled-in Windows text to the VM. It LOOKS like you reached
+           Windows. (This briefly fooled us into thinking SSH was looping back.)
+   RIGHT:  ssh ubuntu-vm 'echo $(whoami) on $(hostname)'
+           Single quotes are literal in PowerShell, so $(...) runs in the VM.
+
+GOTCHA #2 -- Windows ssh.exe can strip EMBEDDED double quotes.
+   A remote command wrapped in double quotes that also contains "|" or "&&" can
+   lose its quotes in transit, so the LOCAL or REMOTE shell mis-parses the
+   pipe/operator (we saw 'kernel:: command not found'). Avoid embedding double
+   quotes; prefer single-quoted commands, or pipe a script over stdin.
+
+GOTCHA #3 -- Here-strings piped to ssh can carry a UTF-8 BOM.
+   Piping a PowerShell @'...'@ here-string into "ssh ... bash" can prepend a BOM
+   to the first line, yielding 'bash: line 1: <BOM>echo: command not found'.
+   Only the first line is hit. Avoid by passing the command as a single-quoted
+   ssh argument with ';' separators, or save a .sh file into the shared folder
+   and run it: ssh ubuntu-vm 'bash /media/sf_CAMIPM_Ubuntu_VM2/foo.sh'.
+
+GOTCHA #4 -- Passwordless login still asks for a password.
+   Almost always a malformed authorized_keys on the VM:
+     - The key line got Windows CRLF line endings. Fix inside the VM:
+           sed -i 's/\r$//' ~/.ssh/authorized_keys
+     - The key got split across lines (it must be ONE line).
+     - Wrong permissions. Fix:  chmod 700 ~/.ssh ; chmod 600 ~/.ssh/authorized_keys
+   Diagnose verbosely:  ssh -v ubuntu-vm 'true'   (look for "Authentications
+   that can continue" / "Offering public key").
+
+PROBLEM -- "Connection refused" on port 2222.
+   Something in the chain is down. Check in order:
+     1. Is the VM running?   & $vbm list runningvms
+     2. Does the port-forward rule exist? (Section 6) -- re-add often drops it.
+     3. Is sshd up in the guest?  (console) sudo systemctl status ssh
+     4. Is something ELSE on 2222? (Part G step 1 should say VirtualBoxVM).
+
+PROBLEM -- "Connection timed out".
+   Usually the guest sshd isn't running or the guest IP/network adapter isn't
+   NAT. Confirm Adapter 1 = NAT and sshd active.
+
+PROBLEM -- Shared folder missing inside the VM (/media/sf_... not there).
+   - Guest Additions not installed/loaded:  lsmod | grep vboxguest
+   - User not in vboxsf group:  groups  (then usermod -aG vboxsf <user>; reboot)
+   - Share not defined / not auto-mount: re-check Part C, then reboot guest.
+
+PROBLEM -- "Host key verification failed" / changed host key.
+   Happens if the VM was rebuilt. Remove the stale entry on Windows:
+        ssh-keygen -R "[127.0.0.1]:2222"
+   then reconnect once to accept the new key.
+
+
+================================================================================
+6.  WHAT TO DO AFTER RE-ADDING OR MOVING THE VM  (the situation that started this)
+================================================================================
+
+Because the SSH path is pure loopback (127.0.0.1), changing the network the
+host sits on, or an external server's IP, does NOT affect it and needs NO code
+change. BUT re-importing/re-adding a VM can silently drop the two VirtualBox
+settings the pipeline relies on. After any re-add, verify these two:
+
+  (a) Port-forward rule still present:
+        & $vbm showvminfo "CAMIPM_Ubuntu_VM2" --machinereadable | Select-String Forwarding
+        # expect: Forwarding(0)="SSH,tcp,127.0.0.1,2222,,22"
+        # if missing, re-add it (Part B, Option B2).
+
+  (b) Shared folder still present and pointing at the right host path:
+        & $vbm showvminfo "CAMIPM_Ubuntu_VM2" --machinereadable | Select-String SharedFolder
+        # if missing, re-add it (Part C, Option C2), then reboot the guest.
+
+Then run the four checks in Part G. If they pass, you are done -- the .ps1
+needs no edits.
+
+
+================================================================================
+7.  QUICK REFERENCE -- copy/paste verification block
+================================================================================
+
+  $vbm = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+  & $vbm list runningvms
+  & $vbm showvminfo "CAMIPM_Ubuntu_VM2" --machinereadable | Select-String "Forwarding|SharedFolder"
+  Get-NetTCPConnection -LocalPort 2222 -State Listen | ForEach-Object { (Get-Process -Id $_.OwningProcess).ProcessName }
+  ssh -o BatchMode=yes ubuntu-vm 'echo VMHOST=$(hostname) USER=$(whoami) OS=$(uname -sr)'
+  ssh ubuntu-vm 'bash -lc "command -v brainseg.sh; echo FSLDIR=$FSLDIR"'
+
+  Expected:
+    CAMIPM_Ubuntu_VM2 {..uuid..}
+    Forwarding(0)="SSH,tcp,127.0.0.1,2222,,22"
+    SharedFolderNameMachineMapping1="CAMIPM_Ubuntu_VM2"
+    VirtualBoxVM
+    VMHOST=CAMIPM-Ubuntu-VM2 USER=camipm OS=Linux 6.8.x-...
+    /home/camipm/Documents/Elliott-Scripts/brainseg.sh
+    FSLDIR=/opt/fsl
+
+================================================================================
+END
+================================================================================

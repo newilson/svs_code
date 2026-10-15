@@ -41,6 +41,12 @@ function output = curvefitAuto_varproBaseline(x,y,mode,amp0,center0,width0,ph_ra
 %                .priorWidth  / .lambdaWidth  = soft prior pulling each peak's
 %                               total linewidth toward a supplied estimate.
 %                               See parseBaselineOpt.
+%                .widthGroup  = [n x 1] integers; peaks with the same positive
+%                               value share one total linewidth (0 = own width)
+%                .etaGroup    = [n x 1] integers; same, for the Voigt Gaussian
+%                               fraction (modes 5, 7; ignored otherwise)
+%                .phaseGroup  = [n x 1] integers; same, for the phase (modes
+%                               3, 4, 5; ignored otherwise)
 %   lineShapeOpt - struct with shared additional lineshape options:
 %                .enable      = true/false     (default false)
 %                .nSide       = number of kernel points on one side
@@ -119,7 +125,7 @@ else
     w = ones(np, 1);
 end
 
-% rms weighted signal -- the scale the soft priors are normalised against, so
+% rms weighted signal -- the scale the soft priors are normalized against, so
 % that lambdaPrior / lambdaWidth are dimensionless and portable between
 % datasets with different absolute scaling.
 rmsWY = sqrt(mean((w .* y).^2));
@@ -329,6 +335,10 @@ end
 % safety: keep every initial guess strictly within its bounds
 pars = min(max(pars, lb), ub);
 
+% Optional parameter sharing across peaks: the optimizer sees one parameter per
+% group, and expandPars copies it back to every member.
+[pars, lb, ub, isFree, tiedIdx, srcIdx] = applyParTies(pars, lb, ub, baselineOpt, n, mode);
+
 %% solve
 if size(x)==size(y'), y = y'; end
 
@@ -343,11 +353,16 @@ tolFun = relTolFun * ssrData;
 tolX   = relTolX;
 options = optimset(oldoptions, 'TolFun', tolFun,'TolX', tolX, ...
     'MaxFunEval',20000*n,'MaxIter',12000,'Display',getDisplayFlag(baselineOpt.verbose));
+if all(isFree)
+    solveNL = @(f) lsqnonlin(f, pars, lb, ub, options);
+else
+    solveNL = @(f) expandPars(lsqnonlin(@(q) f(expandPars(q)), pars(isFree), lb(isFree), ub(isFree), options));
+end
 
 if (mode == 1) % Gaussian
 
     parnames = {'amp','pos','width'};
-    ip_nonlin = lsqnonlin(@residual_gaussian,pars,lb,ub,options);
+    ip_nonlin = solveNL(@residual_gaussian);
     Apeak = gaussian_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
@@ -362,7 +377,7 @@ if (mode == 1) % Gaussian
 elseif mode==2 % Lorentzian
 
     parnames = {'amp','pos','width'};
-    ip_nonlin = lsqnonlin(@residual_lorentzian,pars,lb,ub,options);
+    ip_nonlin = solveNL(@residual_lorentzian);
     Apeak = lorentzian_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
@@ -377,7 +392,7 @@ elseif mode==2 % Lorentzian
 elseif mode==3 % complex Lorentzian
 
     parnames = {'amp','pos','width','ph'};
-    ip_nonlin = lsqnonlin(@residual_lorentzian_complex,pars,lb,ub,options);
+    ip_nonlin = solveNL(@residual_lorentzian_complex);
     Apeak = lorentzian_complex_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
@@ -391,7 +406,7 @@ elseif mode==3 % complex Lorentzian
 elseif mode==4 % complex Gaussian
 
     parnames = {'amp','pos','width','ph'};
-    ip_nonlin = lsqnonlin(@residual_gaussian_complex,pars,lb,ub,options);
+    ip_nonlin = solveNL(@residual_gaussian_complex);
     Apeak = gaussian_complex_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
@@ -405,7 +420,7 @@ elseif mode==4 % complex Gaussian
 elseif mode==5 % complex Voigt
 
     parnames = {'amp','pos','widthL','ph','widthG','width'};
-    ip_nonlin = lsqnonlin(@residual_voigt_complex,pars,lb,ub,options);
+    ip_nonlin = solveNL(@residual_voigt_complex);
     Apeak = voigt_complex_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
@@ -421,7 +436,7 @@ elseif mode==5 % complex Voigt
 elseif mode==6 % magnitude Lorentzian
 
     parnames = {'amp','pos','width'};
-    ip_nonlin = lsqnonlin(@residual_lorentzian_magnitude,pars,lb,ub,options);
+    ip_nonlin = solveNL(@residual_lorentzian_magnitude);
     Apeak = lorentzian_magnitude_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
@@ -434,7 +449,7 @@ elseif mode==6 % magnitude Lorentzian
 elseif mode==7 % magnitude Voigt
 
     parnames = {'amp','pos','widthL','widthG','width'};
-    ip_nonlin = lsqnonlin(@residual_voigt_magnitude,pars,lb,ub,options);
+    ip_nonlin = solveNL(@residual_voigt_magnitude);
     Apeak = voigt_magnitude_basis(ip_nonlin, x);
     [ampl, beta, baseline, yfit, y_comp] = solve_linear_block(Apeak, B, y);
     pos = ip_nonlin(1:n);
@@ -494,6 +509,7 @@ else
     output.areasConv = trapz(x(:), abs(y_comp), 1);
     output.areasConvPad = 0;
 end
+output.cost = sum((w .* (yfit - y)).^2) + sum(widthPriorResidual(ip_nonlin).^2);
 output.fit = yfit;
 output.fit_peaks = yfit - baseline;
 output.baseline = baseline;
@@ -509,7 +525,14 @@ output.mode = mode;
 output.baselineOpt = baselineOpt;
 output.lineShapeOpt = lineShapeOpt;
 
-%% residual functions 
+%% residual functions
+
+% Full nonlinear vector from the optimizer's reduced one (parameter sharing)
+function ip = expandPars(q)
+    ip = zeros(1, numel(isFree));
+    ip(isFree) = q;
+    ip(tiedIdx) = ip(srcIdx);
+end
 
 % Soft prior on peak linewidth
 function rw = widthPriorResidual(ip)
@@ -529,7 +552,7 @@ function rw = widthPriorResidual(ip)
     end
     ok = isfinite(pw) & pw > 0;
     if ~any(ok), return; end
-    % Normalise so lambdaWidth is dimensionless and comparable to the data
+    % Normalize so lambdaWidth is dimensionless and comparable to the data
     % term: scale by the rms weighted signal, and by sqrt(npts/npeaks) so the
     % few width residuals carry the same total weight as the many data ones.
     sc = sqrt(baselineOpt.lambdaWidth * numel(y) / sum(ok)) * rmsWY;
@@ -971,7 +994,7 @@ function opt = parseBaselineOpt(x, opt)
     %                nudge, 0 off.
     % .priorWidth    [n x 1] prior TOTAL linewidth per peak, x-units.  NaN or
     %                <=0 entries are skipped (e.g. peaks HSVD did not find).
-    % .lambdaWidth   weight for it.  Normalised so lambdaWidth = 1 means a
+    % .lambdaWidth   weight for it.  Normalized so lambdaWidth = 1 means a
     %                100% relative width error costs the same total
     %                sum-of-squares as a 100% relative misfit on the data.
     %                Voigt (modes 5/7) compares the Olivero-Longbothum total
@@ -992,6 +1015,52 @@ function opt = parseBaselineOpt(x, opt)
     end
     if ~isfield(opt,'weights') || isempty(opt.weights)
         opt.weights = [];  % no weighting (uniform)
+    end
+    if ~isfield(opt,'widthGroup'), opt.widthGroup = []; end
+    if ~isfield(opt,'etaGroup'),   opt.etaGroup   = []; end
+    if ~isfield(opt,'phaseGroup'), opt.phaseGroup = []; end
+end
+
+%% parameter sharing
+function [pars, lb, ub, isFree, tiedIdx, srcIdx] = applyParTies(pars, lb, ub, opt, n, mode)
+% For each group in opt.widthGroup (total width, block 2), opt.etaGroup
+% (Voigt Gaussian fraction) and opt.phaseGroup (phase, block 3), the first
+% member carries the shared parameter:
+% its bounds become the intersection of the members' bounds and its start the
+% members' mean.  The other members are marked not free and copied from it.
+    isFree = true(size(pars));
+    tiedIdx = zeros(1,0);
+    srcIdx  = zeros(1,0);
+    blocks = {opt.widthGroup, n, 'widthGroup'};
+    switch mode
+        case 5, blocks(end+1,:) = {opt.etaGroup, 3*n, 'etaGroup'};
+        case 7, blocks(end+1,:) = {opt.etaGroup, 2*n, 'etaGroup'};
+    end
+    if any(mode == [3 4 5])
+        blocks(end+1,:) = {opt.phaseGroup, 2*n, 'phaseGroup'};
+    end
+    for b = 1:size(blocks,1)
+        grp = blocks{b,1};
+        if isempty(grp), continue; end
+        grp = grp(:).';
+        if numel(grp) ~= n
+            error('baselineOpt.%s must have one entry per peak (%d)', blocks{b,3}, n)
+        end
+        for g = unique(grp(grp > 0))
+            m = blocks{b,2} + find(grp == g);
+            if numel(m) < 2, continue; end
+            lo = max(lb(m));
+            hi = min(ub(m));
+            if lo > hi
+                error('baselineOpt.%s group %d: member bounds do not overlap', blocks{b,3}, g)
+            end
+            lb(m(1)) = lo;
+            ub(m(1)) = hi;
+            pars(m(1)) = min(max(mean(pars(m)), lo), hi);
+            isFree(m(2:end)) = false;
+            tiedIdx = [tiedIdx m(2:end)]; %#ok<AGROW>
+            srcIdx  = [srcIdx repmat(m(1), 1, numel(m)-1)]; %#ok<AGROW>
+        end
     end
 end
 
