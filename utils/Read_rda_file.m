@@ -97,7 +97,7 @@ rda.ColumnVector(3) = str2num(value);
 
 otherwise
 % We don't know what this variable is. Report this just to keep things clear
-disp(['Unrecognised variable ' , variable ]);
+disp(['Unrecognized variable ' , variable ]);
 end
 
 else

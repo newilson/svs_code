@@ -85,19 +85,19 @@ broadIdx10 = find(strcmp(compoundNames, 'Broad10_5'));
 if ~isempty(broadIdx10)
     molecules(end+1).name = 'Broad10_5';
     molecules(end).compoundIdx = broadIdx10;
-    molecules(end).color = [0.7 0.7 0.7];  % light grey
+    molecules(end).color = [0.7 0.7 0.7];  % light gray
 end
 broadIdx8 = find(strcmp(compoundNames, 'Broad8_5'));
 if ~isempty(broadIdx8)
     molecules(end+1).name = 'Broad8_5';
     molecules(end).compoundIdx = broadIdx8;
-    molecules(end).color = [0.55 0.55 0.55];  % grey
+    molecules(end).color = [0.55 0.55 0.55];  % gray
 end
 
 % Also include ATP-alpha since it overlaps this region
 molecules(end+1).name = 'ATP-\alpha';
 molecules(end).compoundIdx = find(strcmp(compoundNames, 'ATPa'));
-molecules(end).color = [0.5 0.5 0.5];  % dark grey
+molecules(end).color = [0.5 0.5 0.5];  % dark gray
 
 %% Compute spectra
 ppmAxis = fs.exptParams.ppmAxis;

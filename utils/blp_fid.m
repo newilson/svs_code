@@ -142,7 +142,7 @@ if autoSelect
     logS = log10(svals);
     nSV  = length(logS);
     
-    % Normalise x-axis to [0, 1] so curvature is scale-invariant
+    % Normalize x-axis to [0, 1] so curvature is scale-invariant
     x = (0:nSV-1)' / (nSV - 1);
     y = logS;
     

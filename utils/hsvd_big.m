@@ -12,8 +12,8 @@ function [a_arr,b_arr,lb_dt_arr,f_dt_arr,Z_arr,S_arr,fid_fit, U ,S,V] = ...
 %
 %    alpha: complex concentrations        
 %     beta: indirect decays/frequencies   
-%    lb_dt: decay     [normalised units]
-%     f_dt: frequency [normalised units]
+%    lb_dt: decay     [normalized units]
+%     f_dt: frequency [normalized units]
 %        Z: least squares matrix
 %        S: singular matrix
 %  fid_fit: generated FID of fit (in time domain for truncation)
@@ -22,7 +22,7 @@ function [a_arr,b_arr,lb_dt_arr,f_dt_arr,Z_arr,S_arr,fid_fit, U ,S,V] = ...
 %      fid: FID (if 2D => hsvd along t2)
 %        p: number of decaying sinusoids
 %        n: matrix size for SVD
-%    bound: boundaries for fitting [normalised units]
+%    bound: boundaries for fitting [normalized units]
 %           [-0.5 0.5] (default): fit whole FID
 %           [-0.02 0.02]: fit area of water => usable for h2o suppression
 %    figid: figure id; if 0 => no plotting
@@ -94,8 +94,8 @@ for ll=1:si(1),
   % least squares fit (left side is pseudo-inverse of right side)
 
   b  = eig(Z);			% eigenvalues yield the decays/frequencies
-  lb_dt = -log(abs(b))/pi;	% (normalised) line widths
-  f_dt  = angle(b)/(2*pi);	% (normalised) frequencies
+  lb_dt = -log(abs(b))/pi;	% (normalized) line widths
+  f_dt  = angle(b)/(2*pi);	% (normalized) frequencies
   
   % create index with sensible values and within bound
   ind = find((lb_dt>0)&(f_dt>bound(1))&(f_dt<bound(2)));

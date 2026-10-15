@@ -7,7 +7,7 @@ function D = dawson(z)
 %   Computed from the Faddeeva function w(z) (fadf.m) via
 %       w(z) = exp(-z^2) + (2i/sqrt(pi)) * D(z)
 %   For real z this reduces to D = sqrt(pi)/2 * imag(w(z)), which is used
-%   directly because it avoids cancelling the two exp(-z^2) real parts.
+%   directly because it avoids canceling the two exp(-z^2) real parts.
 %   Complex arguments are evaluated in the upper half plane (fadf conjugates
 %   lower-half-plane input without undoing it) and reflected back using
 %   D(conj(z)) = conj(D(z)).

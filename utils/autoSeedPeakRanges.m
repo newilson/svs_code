@@ -37,6 +37,8 @@ wbg = max(3, round(opt.bgSmoothPPM/dppm));
 bg  = movmean(rS, wbg);
 d   = rS - bg;                                  % peaks above broad background
 d   = movmean(d, max(1, round(0.02/dppm)));     % light denoise for picking
+isPk = false(size(d));
+isPk(2:end-1) = d(2:end-1) > d(1:end-2) & d(2:end-1) >= d(3:end);
 
 specList = opt.peaks;
 for i = 1:numel(specList)
@@ -47,7 +49,7 @@ for i = 1:numel(specList)
     hw = specList(i).halfWidth;
     m  = ppmS >= min(sw) & ppmS <= max(sw);
     if ~any(m), continue; end
-    dd = d; dd(~m) = -inf;
+    dd = d; dd(~(m & isPk)) = -inf;
     [pk, ix] = max(dd);
     if ~isfinite(pk) || pk <= 0, continue; end   % no positive peak -> keep original
     c = ppmS(ix);

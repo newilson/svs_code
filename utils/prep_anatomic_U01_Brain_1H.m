@@ -1,12 +1,26 @@
-function prep_anatomic_u01(sessionDir, outDir)
+function prep_anatomic_u01(sessionDir, outDir, opts)
 % U01_PREP_ANAT  Stage 1 of U01 SVS pipeline.
 %   Locates T1w DICOMs and a 1H SVS DICOM under sessionDir on Z:\,
 %   converts T1w to NIfTI, SPM-bias-corrects it, and runs imscribe to
 %   produce svsmask.nii. All outputs land in outDir (the staging dir
 %   inside the VM-shared folder).
 %
+%   prep_anatomic_U01_Brain_1H(sessionDir, outDir, 'ExamPattern', p, ...
+%       'SvsPattern', q, 'MaskName', m)
+%     ExamPattern  exam folder under sessionDir     (default 'E*')
+%     SvsPattern   SVS DICOM series in the exam     (default 'SVSSEL*NAD*')
+%     MaskName     mask file written to outDir      (default 'svsmask.nii')
+%
 %   Each stage is skipped if its output already exists in outDir, so
 %   reruns only recompute what's missing.
+
+arguments
+    sessionDir       (1,:) char
+    outDir           (1,:) char
+    opts.ExamPattern (1,:) char = 'E*'
+    opts.SvsPattern  (1,:) char = 'SVSSEL*NAD*'
+    opts.MaskName    (1,:) char = 'svsmask.nii'
+end
 
 if ~exist(outDir,'dir'), mkdir(outDir); end
 
@@ -15,7 +29,7 @@ t1Nii      = fullfile(outDir, 't1w.nii');
 [~, t1Stem] = fileparts(t1Nii);
 biasNii8   = fullfile(outDir, [t1Stem '_SPM8bias.nii']);
 biasNii12  = fullfile(outDir, [t1Stem '_SPM12bias.nii']);
-svsmaskNii = fullfile(outDir, 'svsmask.nii');
+svsmaskNii = fullfile(outDir, opts.MaskName);
 
 needT1   = ~isfile(t1Nii);
 needBias = ~(isfile(biasNii8) || isfile(biasNii12));
@@ -28,9 +42,9 @@ end
 
 % ---- Locate exam dir (needed for any DICOM step) -------------------
 if needT1 || needMask
-    examDirs = dir(fullfile(sessionDir,'E*'));
+    examDirs = dir(fullfile(sessionDir,opts.ExamPattern));
     examDirs = examDirs([examDirs.isdir]);
-    assert(numel(examDirs) >= 1, 'No E* exam folder under %s', sessionDir);
+    assert(numel(examDirs) >= 1, 'No %s exam folder under %s', opts.ExamPattern, sessionDir);
     examDir  = fullfile(examDirs(1).folder, examDirs(1).name);
 end
 
@@ -70,9 +84,9 @@ end
 % scratchpath = outDir (where 'svsmask.nii' will be written).
 if needMask
     % 1H SVS NAD series -- used to define the voxel mask
-    svsDirs = dir(fullfile(examDir,'SVSSEL*NAD*'));
+    svsDirs = dir(fullfile(examDir,opts.SvsPattern));
     svsDirs = svsDirs([svsDirs.isdir]);
-    assert(~isempty(svsDirs), 'No SVSSEL*NAD* folder in %s', examDir);
+    assert(~isempty(svsDirs), 'No %s folder in %s', opts.SvsPattern, examDir);
     svsDir  = fullfile(svsDirs(1).folder, svsDirs(1).name);
 
     svsFiles = dir(fullfile(svsDir,'*'));
@@ -86,8 +100,12 @@ if needMask
     opt.svsmask     = 1;
     imscribe_engine({t1Nii}, {svsDcm}, {[]}, opt);
 
-    assert(isfile(svsmaskNii), ...
+    engineMask = fullfile(outDir, 'svsmask.nii');
+    assert(isfile(engineMask), ...
         'imscribe_engine did not produce svsmask.nii in %s', outDir);
+    if ~strcmp(engineMask, svsmaskNii)
+        movefile(engineMask, svsmaskNii);
+    end
 else
     fprintf('prep_anatomic: %s exists -- skipping imscribe\n', svsmaskNii);
 end

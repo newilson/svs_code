@@ -22,8 +22,8 @@
 % lambda controls speed of diffusion (you usually want it at a maximum of
 % 0.25)
 %
-% Diffusion equation 1 favours high contrast edges over low contrast ones.
-% Diffusion equation 2 favours wide regions over smaller ones.
+% Diffusion equation 1 favors high contrast edges over low contrast ones.
+% Diffusion equation 2 favors wide regions over smaller ones.
 
 % Reference: 
 % P. Perona and J. Malik. 
@@ -43,7 +43,7 @@
 function diff = anisodiff(im, niter, kappa, lambda, option)
 
 if ndims(im)==3
-  error('Anisodiff only operates on 2D grey-scale images');
+  error('Anisodiff only operates on 2D gray-scale images');
 end
 
 im = double(im);

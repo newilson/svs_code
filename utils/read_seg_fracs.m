@@ -48,7 +48,7 @@ else
     elseif all(~cellfun(@isempty, iFrac))
         use = iFrac;
     else
-        error('Unrecognised seg TSV layout in %s: %s', segTsv, strjoin(cols, ','));
+        error('Unrecognized seg TSV layout in %s: %s', segTsv, strjoin(cols, ','));
     end
 
     % One row per ROI.  Refuse to guess when several are present rather than

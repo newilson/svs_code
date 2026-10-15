@@ -1,5 +1,5 @@
 %% Plot AMARES fit results — full spectrum
-% Run after any AMARES stage to visualise all fitted peaks.
+% Run after any AMARES stage to visualize all fitted peaks.
 %
 % Usage:
 %   plot_amares_full(Results)
@@ -68,7 +68,7 @@ displayNames = containers.Map(...
     {'PCr','ATPb','ATPa','ATPg','Pi','PE','PC','GPE','GPC','BroadMP','DPG','NADH','Broad10_5','Broad8_5'}, ...
     {'PCr','ATP-\beta','ATP-\alpha','ATP-\gamma','Pi','PE','PC','GPE','GPC','BroadMP','DPG','NADH','Broad10_5','Broad8_5'});
 
-% Assign colours by spectral region for unassigned compounds
+% Assign colors by spectral region for unassigned compounds
 defaultColors = lines(nCompounds);
 for i = 1:nCompounds
     if ~assigned(i)

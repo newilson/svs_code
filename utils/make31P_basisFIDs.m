@@ -20,7 +20,9 @@ function [basisFIDs, basisInfo] = make31P_basisFIDs(t, hzpppm, varargin)
 %   downstream fit stays small.
 %
 %   INPUTS
-%     t       time vector (s), length N. Expected t(1)=0.
+%     t       time vector (s), length N. t(1) is the time of the first FID
+%             point after the excitation (TE, or slightly negative after
+%             back-prediction); normalization is still at t = 0.
 %     hzpppm  scalar, Hz/ppm (e.g., 120.30 at 7T 31P).
 %
 %   NAME-VALUE OPTIONS
@@ -64,6 +66,8 @@ refExtPpm   = p.Results.refExtPpm;
 
 t = t(:);
 N = length(t);
+padT0 = t(1) ~= 0;
+if padT0, t = [0; t]; end
 
 mets = getBasisParamStruct_31P7T_brain(lwHzDefault);
 
@@ -100,7 +104,7 @@ for k = 1:nMet
 
         case 'lines'
             [fHz_list, amp_list] = expandLineModel(m.lines, hzpppm, adcshift);
-            fids = zeros(N,1);
+            fids = zeros(numel(t),1);
             for j = 1:numel(fHz_list)
                 fids = fids + amp_list(j) * exp(-1i*2*pi*fHz_list(j)*t);
             end
@@ -120,6 +124,7 @@ for k = 1:nMet
     if abs(fids(1)) > 0
         fids = fids / fids(1);
     end
+    if padT0, fids = fids(2:end); end
 
     basisFIDs(:,k)         = fids;
     basisInfo(k).name      = m.name;
