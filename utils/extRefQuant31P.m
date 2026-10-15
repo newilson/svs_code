@@ -1,8 +1,8 @@
-function absExt = extRefQuant31P(fitNames, fitAreas, metProps, TR_ms, TE_ms, extRef, internalAbsQ, outDir, scanID)
+function absExt = extRefQuant31P(fitNames, fitAreas, metProps, TR_ms, TE_ms, extRef, internalAbsQ)
 % EXTREFQUANT31P  Absolute 31P quant from an EXTERNAL reference phantom.
 %
 %   absExt = extRefQuant31P(fitNames, fitAreas, metProps, TR_ms, TE_ms, ...
-%                           extRef, internalAbsQ, outDir, scanID)
+%                           extRef, internalAbsQ)
 %
 % Converts each fitted metabolite amplitude to absolute [mM] against an
 % external phantom of known concentration, correcting for:
@@ -13,31 +13,50 @@ function absExt = extRefQuant31P(fitNames, fitAreas, metProps, TR_ms, TE_ms, ext
 %
 %   [M] = [ref] * (S_M/S_ref) * (V_ref/V_M) * (R_ref/R_M) * (n_ref/n_M)
 %
-% *** B1 CORRECTION IS CURRENTLY DISABLED (extRef.applyB1 = false). ***
-% The B1+ excitation-efficiency factor (eta_ref/eta_M) and the reciprocity
-% receive factor (relB1_ref/relB1_M) are both computed and reported for QC
-% but are NOT applied to the concentrations.  Set extRef.applyB1 = true to
-% restore them; see the applyB1 block below.  Rationale: the external
-% phantom is faint (D2O / PBS) so its relB1 is either masked out by
-% calc_B1map_new or must be extrapolated, and neither is trustworthy yet.
+% Every input has exactly one source.  There are no fallbacks: a missing input
+% stops the quant with a message naming it, rather than substituting something
+% that yields a plausible wrong number.
+%
+%   relB1  the 31P ISIS B1CALIB flip series, fit per peak by relB1FromCalib31P
+%          -- tissue from PCr, phantom from RefExt.  Located automatically
+%          under extRef.sessionDir\E*.
+%   V_ref  refArea_mm2 * slabThickness_mm, geometric.
+%   V_M    explicit brainVol_mL, or HD-BET (brain) / Dixon (calf) mask
+%          INTERSECT the ISIS slab.
+%
+% The 1H TurboFLASH B1 map is GONE, along with its threshold segmentation.  It
+% was the wrong nucleus for relB1, its masks under-read the faint D2O/PBS
+% phantom by ~3x for V_ref, and its voxel-count V_M silently returned a
+% skull-and-scalp head mask (brain) or under-read the excited leg by 1.5-3x
+% (calf).  Do not reintroduce it.
+%
+% B1 correction is applied only when extRef.applyB1 is true; it is still off by
+% default, but the numbers behind it are now measured rather than extrapolated.
 %
 % The isis_svs sequence is 1D-ISIS (slab select via adiabatic pulses + hard
-% pulse excitation), so a relative B1+ of relB1 would give an actual flip of
-% relB1*flip and excitation efficiency sin(relB1*flip).
+% pulse excitation).  The hard pulse is not spatially selective, so there is
+% no chemical-shift displacement from it, but it does have a SPECTRAL profile:
+% peaks at different shifts are excited differently.  With the acquisition's
+% pulse duration and center available (extRef.acqPulseDur / .acqExcCtr /
+% .hzPerPpm) the factor is rectMxy(flip, T, (ppm-ctr)*hz, relB1), evaluated
+% per metabolite; without them it degrades to the on-resonance sine,
+% sin(relB1*flip), which is the previous behavior.  Note the calibration's
+% pulse and center are deliberately NOT the acquisition's -- the calibration
+% uses a long pulse to reach flips past 90 deg, which narrows its profile --
+% so the factor is recomputed here rather than carried over from the fit.
 %
-% ANATOMY: extRef.anatomy selects the tissue segmentation.
-%   'brain' - HD-BET brain mask INTERSECT ISIS slab when available, else an
-%             intensity-threshold head mask (includes skull/scalp).
-%   'calf'  - intensity-threshold leg mask (largest bright component).  NOTE
-%             this includes subcutaneous fat and marrow, which carry no PCr /
-%             ATP, so V_M is an OVERestimate and the external-reference calf
-%             concentrations are correspondingly biased LOW.  There is no
-%             HD-BET analogue for the leg.
+% ANATOMY: extRef.anatomy selects which V_M route applies.
+%   'brain' - HD-BET brain mask INTERSECT the ISIS slab (imscribe).
+%   'calf'  - Dixon water/fat -> muscle mask INTERSECT the ISIS slab, which
+%             excludes subcutaneous fat and marrow (they carry no PCr / ATP,
+%             so counting them would bias the calf concentrations LOW).
 %
 % extRef fields (see extRefDefaults in processU01_Brain_31P / _Calf_31P):
-%   b1Dir, refPpm, refConc_mM, nP, flipDeg, T1_ms, T2_ms, anatomy, applyB1,
-%   dropEndSlices, brainThr, phantThr, phantMinVox, phantomMask (optional
-%   override), reciprocityReceive, plt.
+%   sessionDir, refPpm, refConc_mM, refArea_mm2, slabThickness_mm, nP, flipDeg,
+%   T1_ms, T2_ms, anatomy, applyB1, reciprocityReceive, b1CalibFiles,
+%   acqPulseDur / acqExcCtr / hzPerPpm (acquisition excitation geometry),
+%   basisInfo, line (locateRefExtLine31P result; not found stops the quant),
+%   brainVol_mL | brainMaskNii+t1Nii+isisDcm | dixonMagDir+isisDcm.
 %
 % fitAreas are the per-spin-normalized amplitudes (amplScaled), so n cancels
 % when nP=1 for all species; the n_ref/n_M factor is kept explicit for clarity.
@@ -59,123 +78,88 @@ absExt.areaRef = areaRef;   % recorded even if the quant below cannot run
 if ~(areaRef > 0)
     warning('extRefQuant31P: RefExt amplitude <= 0 (%.3g); external quant unreliable.', areaRef);
 end
-
-% ---------------------------------------------------------------
-% B1 map: relative-B1 volume + magnitude images for segmentation
-% ---------------------------------------------------------------
-
-if isempty(extRef.b1Dir) || ~isfolder(extRef.b1Dir)
-    if isempty(extRef.b1Dir)
-        msg = 'no B1 map series found in session';
-    else
-        msg = sprintf('B1 map dir not found: %s', extRef.b1Dir);
+if isfield(extRef,'line') && ~isempty(extRef.line)
+    absExt.line = extRef.line;
+    if ~extRef.line.found
+        msg = sprintf('no phantom line in the spectrum (best %.2f ppm, SNR %.1f)', ...
+                      extRef.line.ppmFound, extRef.line.snr);
+        warning('extRefQuant31P: %s. RefExt amplitude %.4g kept; no concentrations.', msg, areaRef);
+        absExt.reason = msg;
+        return
     end
-    warning(['extRefQuant31P: %s. RefExt was fitted (amplitude %.4g) but cannot ' ...
-             'be converted to concentrations without the phantom/tissue volumes. ' ...
-             'Continuing with internal reference only.'], msg, areaRef);
+end
+
+% Locate and fit the calibration here rather than in the drivers: it is only
+% ever used for absolute quantitation, so it belongs with the code that
+% consumes it.  A caller may still pre-supply extRef.b1calib (already fitted)
+% or extRef.b1CalibFiles (explicit DICOMs), both of which win over the search.
+if strcmpi(getfielddef(extRef,'b1Source','b1calib'),'b1calib') && ...
+        ~isfield(extRef,'b1calib')
+    sd = getfielddef(extRef,'sessionDir','');
+    if isempty(sd)
+        extRef.b1calib = struct('ok',false, ...
+            'reason','extRef.sessionDir not set, cannot locate the B1CALIB series');
+    else
+        extRef.b1calib = relB1FromCalib31P(sd, extRef.refPpm, ...
+                            struct('files',{getfielddef(extRef,'b1CalibFiles',{})}));
+    end
+    if extRef.b1calib.ok
+        fprintf(['extRef: 31P B1CALIB relB1  tissue(PCr) %.4f  phantom(RefExt) %.4f' ...
+                 '  [refVolt %.1f V]\n'], extRef.b1calib.relB1_M, ...
+                extRef.b1calib.relB1_ref, extRef.b1calib.refVolt);
+    else
+        fprintf('extRef: 31P B1CALIB unavailable (%s)\n', extRef.b1calib.reason);
+    end
+end
+% Recorded now so the relB1 numbers survive the early returns below when
+% the volume path cannot run.
+absExt.b1calib = getfielddef(extRef,'b1calib',struct('ok',false));
+
+
+% ---------------------------------------------------------------
+% Phantom volume V_ref
+% ---------------------------------------------------------------
+% The phantom is a 15 mL tube standing across the slab, so the EXCITED
+% reference volume is its cross-section times the slab thickness -- geometric,
+% nothing to segment.
+%
+% refArea_mm2 is measured off the images (200 mm2, observed 180-220, so ~+-10%
+% straight onto every external concentration).  slabThickness_mm is read from
+% the header per scan and is NOT constant (40 mm brain, 60 mm calf), so it must
+% never be hard-coded.  Both are required: there is no fallback.
+haveArea = isfield(extRef,'refArea_mm2')      && ~isempty(extRef.refArea_mm2)      && extRef.refArea_mm2 > 0;
+haveSlab = isfield(extRef,'slabThickness_mm') && ~isempty(extRef.slabThickness_mm) && extRef.slabThickness_mm > 0;
+if ~haveArea || ~haveSlab
+    if ~haveArea
+        msg = 'extRef.refArea_mm2 not set';
+    else
+        msg = 'ISIS slab thickness not readable from the header';
+    end
+    warning(['extRefQuant31P: %s, so V_ref cannot be computed. RefExt amplitude ' ...
+             '%.4g kept; no concentrations.'], msg, areaRef);
     absExt.reason = msg;
     return
 end
-
-try
-    [B1map, ~, b1alpha, images] = readB1(extRef.b1Dir);
-catch ME
-    warning(['extRefQuant31P: could not read B1 map (%s: %s). RefExt was fitted ' ...
-             '(amplitude %.4g) but external quant is skipped. Continuing.'], ...
-            extRef.b1Dir, ME.message, areaRef);
-    absExt.reason = sprintf('readB1 failed: %s', ME.message);
-    return
-end
-
-% images is [nx ny nz nFlip]; use the mean over flip angles for a stable
-% anatomical magnitude for segmentation.
-if ndims(images) == 4
-    magVol = mean(images, 4);
-else
-    magVol = images;
-end
-nz = size(B1map, 3);
-
-% voxel dimensions from DICOM
-[px, slthk] = b1VoxelDims(extRef.b1Dir);
-voxVol_mm3  = px(1) * px(2) * slthk;
+V_ref_mm3    = extRef.refArea_mm2 * extRef.slabThickness_mm;
+V_ref_source = sprintf('cross-section %.0f mm2 * %.0f mm slab (hdr)', ...
+                       extRef.refArea_mm2, extRef.slabThickness_mm);
 
 % ---------------------------------------------------------------
-% Slices spanning the excited slab
+% Tissue volume V_M
 % ---------------------------------------------------------------
-% The B1 map shares the ISIS slab orientation, so the slab is the whole B1
-% stack minus the first and last slice (slice-profile edge effects).  A 2D
-% (single-slice) B1 map has nothing to drop -- keep it as-is.
-drop = extRef.dropEndSlices;
-if nz > 2*drop
-    sel = (1 + drop) : (nz - drop);
-else
-    sel = 1 : nz;
-    if nz > 1
-        warning(['extRefQuant31P: only %d B1 slice(s); cannot drop %d from each ' ...
-                 'end -- using all slices.'], nz, drop);
-    end
-end
-mag  = magVol(:,:,sel);
-B1c  = B1map(:,:,sel);
-gmax = max(mag(:));
-
-% ---------------------------------------------------------------
-% Segment tissue (brain or calf) and phantom
-% ---------------------------------------------------------------
-% Tissue mask.  brain: caller-supplied B1-space mask -> HD-BET NIfTI
-% (resampled, when wired) -> intensity-threshold head fallback.
-% calf: caller-supplied mask -> intensity-threshold leg (largest bright CC).
-[tissueMask, brainSource] = computeTissueMask(extRef, mag, gmax, sel);
-
-% Phantom: bright, compact object OUTSIDE the subject. Either supplied by the
-% caller or found automatically as the largest CC outside the dilated subject.
-% Use an intensity-threshold WHOLE-SUBJECT mask for the exclusion (independent
-% of the tissueMask, so for brain the skull/scalp rim is not mistaken for
-% phantom, and for calf the fat rim is not either).
-headForExcl = mag > extRef.brainThr * gmax;
-headForExcl = imfill(keepLargestCC(headForExcl), 'holes');
-if isfield(extRef,'phantomMask') && ~isempty(extRef.phantomMask)
-    pm = logical(extRef.phantomMask);
-    if size(pm,3) == nz, pm = pm(:,:,sel); end
-    phantomMask = pm;
-else
-    outside = (mag > extRef.phantThr * gmax) & ~imdilate3(headForExcl, 2);
-    outside = bwareaopen(outside, extRef.phantMinVox);
-    phantomMask = keepLargestCC(outside);
-end
-
-nVoxRef = nnz(phantomMask);
-nVoxM   = nnz(tissueMask);
-% An empty phantom or tissue mask would silently drive every external
-% concentration to 0 or Inf, which is worse than reporting nothing.  Bail out
-% the same way a missing B1 scan does.
-if nVoxRef == 0 || nVoxM == 0
-    if nVoxRef == 0
-        msg = 'no phantom voxels segmented (check b1Dir / phantThr / phantMinVox)';
-    else
-        msg = 'no tissue voxels segmented (check brainThr)';
-    end
-    warning(['extRefQuant31P: %s. RefExt amplitude %.4g kept, but external ' ...
-             'concentrations are not computed. Continuing.'], msg, areaRef);
-    absExt.reason  = msg;
-    absExt.nVoxRef = nVoxRef;
-    absExt.nVoxTissue = nVoxM;
-    return
-end
-
-V_ref_mm3 = nVoxRef * voxVol_mm3;
-
-% Tissue volume V_M.  Priority:
+% Priority:
 %   1) explicit extRef.brainVol_mL
-%   2) BRAIN ONLY: HD-BET brain mask INTERSECT ISIS slab via imscribe
-%      (validated Way 1).  There is no calf analogue -- no skull-stripping
-%      equivalent exists for the leg -- so calf always uses (3).
-%   3) segmented tissueMask voxel count over the slab slices.  Because the B1
-%      map shares the ISIS slab orientation and `sel` already drops the end
-%      slices, this count IS the in-slab tissue volume.
-V_M_mm3    = nVoxM * voxVol_mm3;
-V_M_source = sprintf('%s (%d B1 voxels in slab)', brainSource, nVoxM);
+%   2) BRAIN: HD-BET brain mask INTERSECT ISIS slab via imscribe (validated
+%      Way 1)
+%   3) CALF: Dixon water/fat -> muscle mask INTERSECT ISIS slab
+% There is no fallback.  The old route -- counting bright voxels in the 1H B1
+% map and scaling that count from the B1 slab to the ISIS slab -- is gone with
+% the rest of the B1 mapping: for brain it silently returned a head mask
+% including skull and scalp, and for calf it under-read the excited leg by
+% 1.5-3x depending on B1 coverage.  A missing anatomic volume now stops the
+% quant instead of producing a plausible wrong number.
+V_M_mm3     = NaN;
+V_M_source  = 'not determined';
 if isfield(extRef,'brainVol_mL') && ~isempty(extRef.brainVol_mL)
     V_M_mm3    = extRef.brainVol_mL * 1000;
     V_M_source = sprintf('caller brainVol_mL = %.1f mL', extRef.brainVol_mL);
@@ -188,49 +172,118 @@ elseif strcmpi(extRef.anatomy,'brain') ...
         V_M_mm3    = vml * 1000;
         V_M_source = sprintf('HD-BET brain INT ISIS slab (imscribe) = %.1f mL', vml);
     catch ME
-        warning('extRefQuant31P: brainVolInISISslab31P failed (%s); using threshold V_M.', ME.message);
+        warning('extRefQuant31P: brainVolInISISslab31P failed (%s); V_M unavailable.', ME.message);
+    end
+elseif strcmpi(extRef.anatomy,'calf') ...
+        && isfield(extRef,'dixonMagDir') && ~isempty(extRef.dixonMagDir) ...
+        && isfolder(extRef.dixonMagDir) ...
+        && isfield(extRef,'isisDcm') && ~isempty(extRef.isisDcm) && isfile(extRef.isisDcm)
+    % Calf analog: Dixon water/fat -> muscle mask INTERSECT ISIS slab.
+    % Excludes subcutaneous fat and marrow, and needs no slab extrapolation --
+    % the Dixon spans ~165 mm against a 60 mm slab.
+    try
+        [vml, dxi]  = muscleVolInISISslab31P(extRef.dixonMagDir, extRef.isisDcm, ...
+                          struct('ffThresh', extRef.ffThresh));
+        V_M_mm3     = vml * 1000;
+        V_M_source  = sprintf(['Dixon muscle INT ISIS slab (imscribe) = %.1f mL ' ...
+                               '(FF<%.2f, muscle %.0f%% of leg)'], ...
+                               vml, dxi.ffThresh, 100*dxi.muscleFrac);
+        absExt.dixon = dxi;
+    catch ME
+        warning('extRefQuant31P: muscleVolInISISslab31P failed (%s); V_M unavailable.', ME.message);
     end
 end
 
 % ---------------------------------------------------------------
-% B1+ excitation efficiency, eta = sin(relB1 * flip)   [appropriate model for adiabatic ISIS]
+% Both volumes settled -- this is where a missing input becomes fatal
 % ---------------------------------------------------------------
-% Everything in this block is diagnostic while extRef.applyB1 is false: the
-% values are stored and printed, but the concentration loop below multiplies
-% by 1 instead. 
-relB1_M = NaN; relB1_ref = NaN; b1method = 'not computed';
-try
-    % Tissue is bright -> the processed (masked, smoothed) B1 map is valid there.
-    relB1_M = safeMean(B1c(tissueMask & B1c > 0));
-
-    % Phantom B1+.  The phantom is faint (D2O/PBS), so calc_B1map_new masks it
-    % to 0 AND a direct double-angle measurement there is unreliable/too high.
-    % Default is to EXTRAPOLATE the smooth, valid tissue B1+ field to the
-    % phantom location by a low-order polynomial fit (B1+ varies slowly).
-    switch lower(extRef.phantomB1Method)
-        case 'value'
-            relB1_ref  = extRef.phantomB1Value;
-            b1method   = 'fixed value';
-        case 'measure'
-            if ndims(images) == 4 && size(images,4) >= 3
-                relVol   = calcRelB1_unmasked(images(:,:,sel,1), images(:,:,sel,2), images(:,:,sel,3), b1alpha);
-                relB1_ref = safeMean(relVol(phantomMask & isfinite(relVol) & relVol > 0 & relVol < 1.8));
-            else
-                relB1_ref = safeMean(B1c(phantomMask & B1c > 0));
-            end
-            b1method = 'direct double-angle (raw images)';
-        otherwise  % 'extrap'
-            relB1_ref = extrapB1ToMask(B1c, tissueMask, phantomMask, extRef.b1ExtrapOrder);
-            b1method  = sprintf('order-%d polynomial extrapolation of tissue B1+', extRef.b1ExtrapOrder);
-    end
-catch ME
-    warning('extRefQuant31P: B1 estimation failed (%s); B1 diagnostics left NaN.', ME.message);
-    b1method = sprintf('FAILED: %s', ME.message);
+% Checked on the VOLUMES rather than on the mask voxel counts, because the
+% masks are only one of several ways to get here and are no longer the
+% expected one.  A zero or NaN volume would drive every concentration to 0,
+% Inf or NaN, which is worse than reporting nothing.
+if ~(isfinite(V_ref_mm3) && V_ref_mm3 > 0)
+    msg = ['V_ref could not be determined: set extRef.refArea_mm2 and make the ' ...
+           'ISIS slab thickness readable from the header'];
+    warning('extRefQuant31P: %s. RefExt amplitude %.4g kept; no concentrations.', msg, areaRef);
+    absExt.reason = msg;
+    return
 end
-% actual flip is relB1 * (prescribed flip), so eta = sin(relB1 * flip).
-flipRad = extRef.flipDeg * pi/180;
-eta_ref = sin(relB1_ref * flipRad);
-eta_M   = sin(relB1_M   * flipRad);
+if ~(isfinite(V_M_mm3) && V_M_mm3 > 0)
+    msg = ['V_M could not be determined: supply extRef.brainVol_mL, or the ' ...
+           'HD-BET mask + T1 + ISIS DICOM (brain), or the Dixon series + ISIS ' ...
+           'DICOM (calf)'];
+    warning('extRefQuant31P: %s. RefExt amplitude %.4g kept; no concentrations.', msg, areaRef);
+    absExt.reason = msg;
+    return
+end
+
+% ---------------------------------------------------------------
+% relB1, from the 31P B1CALIB flip series -- the only source
+% ---------------------------------------------------------------
+relB1_M = NaN; relB1_ref = NaN; b1method = 'unavailable'; voltScale = NaN;
+bc = getfielddef(extRef,'b1calib',struct('ok',false));
+acqV = getfielddef(extRef,'acqRefVolt',NaN);
+calV = getfielddef(bc,'TxVolt',NaN);
+if isfield(bc,'ok') && bc.ok && ~(isfinite(acqV) && acqV > 0 && isfinite(calV) && calV > 0)
+    bc.ok = false;
+    bc.reason = sprintf(['reference voltage missing (acquisition %g V, calibration %g V), ' ...
+                         'so relB1 cannot be carried to the acquisition'], acqV, calV);
+end
+if isfield(bc,'ok') && bc.ok
+    voltScale = acqV / calV;
+    relB1_M   = bc.relB1_M   * voltScale;
+    relB1_ref = bc.relB1_ref * voltScale;
+    % The calibration's pulse and center are recorded because they are NOT the
+    % acquisition's and must never be reused as if they were (see
+    % relB1FromCalib31P).  Only relB1 crosses over, rescaled to the
+    % acquisition's reference voltage.
+    b1method  = sprintf(['31P ISIS B1CALIB flip series (PCr / RefExt), ' ...
+                         'calib %g us pulse at %g ppm, relB1 x %g/%g V'], ...
+                         bc.pulseDur, bc.excCtr, acqV, calV);
+else
+    reason = 'not available';
+    if isfield(bc,'reason') && ~isempty(bc.reason), reason = bc.reason; end
+    warning('extRefQuant31P: 31P B1CALIB unusable (%s) -- there is no relB1.', reason);
+end
+
+% With applyB1 on, a missing relB1 would multiply every concentration by NaN.
+% Stop instead, naming what to fix.
+if extRef.applyB1 && ~(isfinite(relB1_M) && relB1_M > 0 && isfinite(relB1_ref) && relB1_ref > 0)
+    msg = sprintf(['applyB1 is on but relB1 is unavailable (tissue %.4g, phantom %.4g; ' ...
+                   'source: %s)'], relB1_M, relB1_ref, b1method);
+    warning('extRefQuant31P: %s. RefExt amplitude %.4g kept; no concentrations.', msg, areaRef);
+    absExt.reason = msg;
+    return
+end
+
+% ---------------------------------------------------------------
+% Excitation factor at the ACQUISITION's own geometry
+% ---------------------------------------------------------------
+% relB1 is the SPATIAL transmit scaling; the excitation pulse also has a
+% SPECTRAL profile, so two peaks at different shifts are excited differently
+% even at the same relB1.  With a hard pulse both are in rectMxy.  The
+% calibration's pulse and center are NOT the acquisition's (the calibration
+% deliberately uses a long pulse to reach flips past 90 deg, which narrows its
+% profile), so this is recomputed here rather than reused from the fit.
+%
+% Without the acquisition geometry this degrades to the on-resonance sine,
+% eta = sin(relB1 * flip), i.e. no profile term -- the previous behavior.
+acqTus = getfielddef(extRef,'acqPulseDur',[]);
+acqCtr = getfielddef(extRef,'acqExcCtr',[]);
+hzPpm  = getfielddef(extRef,'hzPerPpm',[]);
+useProfile = ~isempty(acqTus) && ~isempty(acqCtr) && ~isempty(hzPpm) && ...
+             isfinite(acqTus) && isfinite(acqCtr) && isfinite(hzPpm);
+
+if useProfile
+    etaOf   = @(ppm,rel) rectMxy(extRef.flipDeg, acqTus, (ppm-acqCtr)*hzPpm, rel);
+    excModel = sprintf('rect %g us at %g ppm, flip %g deg', acqTus, acqCtr, extRef.flipDeg);
+else
+    flipRad = extRef.flipDeg * pi/180;
+    etaOf   = @(~,rel) sin(rel * flipRad);       % ppm ignored: no profile term
+    excModel = sprintf('on-resonance sine, flip %g deg (no excitation profile)', extRef.flipDeg);
+end
+eta_ref = etaOf(extRef.refPpm, relB1_ref);
+eta_M   = etaOf(0,             relB1_M);   % tissue at PCr; per-metabolite below
 
 % ---------------------------------------------------------------
 % Reference relaxation weighting + properties
@@ -250,21 +303,23 @@ absExt.T1ref_ms   = extRef.T1_ms;
 absExt.T2ref_ms   = extRef.T2_ms;
 absExt.nPref      = nPref;
 absExt.Rref       = Rref;
-absExt.V_ref_mL   = V_ref_mm3 / 1000;
+absExt.V_ref_mL     = V_ref_mm3 / 1000;
+absExt.V_ref_source = V_ref_source;
 absExt.V_M_mL     = V_M_mm3   / 1000;
-absExt.nVoxRef    = nVoxRef;
-absExt.nVoxTissue = nVoxM;
-absExt.voxVol_mm3 = voxVol_mm3;
 absExt.relB1_ref  = relB1_ref;
 absExt.relB1_M    = relB1_M;
+absExt.relB1_ref_calib = getfielddef(bc,'relB1_ref',NaN);
+absExt.relB1_M_calib   = getfielddef(bc,'relB1_M',NaN);
+absExt.relB1VoltScale  = voltScale;
+absExt.excModel   = excModel;
 absExt.eta_ref    = eta_ref;
 absExt.eta_M      = eta_M;
-absExt.slicesUsed = sel;
 absExt.TR_ms      = TR_ms;
 absExt.TE_ms      = TE_ms;
 absExt.metabolites = struct('name',{},'area',{},'conc_mM',{}, ...
                             'T1_ms',{},'T2_ms',{},'nPhos',{},'R',{}, ...
-                            'ratio',{},'conc_internal_mM',{},'ext_over_int',{});
+                            'ratio',{},'conc_internal_mM',{},'ext_over_int',{}, ...
+                            'ppm',{},'eta',{},'etaFac',{});
 
 volFac = (V_ref_mm3 / V_M_mm3);
 
@@ -299,8 +354,23 @@ for k = 1:numel(fitNames)
     nPk = metProps(pIdx).nPhos;
     Rk  = R(T1k, T2k);
 
+    % Excitation factor at THIS metabolite's shift.  All tissue metabolites
+    % share the slab and so share relB1_M, but they sit at different offsets
+    % from the excitation center and are excited differently.  ppmOfMet
+    % returns [] when the shift is unknown, which falls back to the PCr value.
+    ppmK   = ppmOfMet(extRef, nm);
+    if useProfile && ~isempty(ppmK)
+        etaK = etaOf(ppmK, relB1_M);
+    else
+        etaK = eta_M;
+    end
+    etaFac_k = etaFac;
+    if extRef.applyB1 && etaK > 0
+        etaFac_k = eta_ref / etaK;
+    end
+
     ratio   = fitAreas(k) / areaRef;
-    conc_mM = ratio * volFac * etaFac * recvFac * (Rref / Rk) * (nPref / nPk) * extRef.refConc_mM;
+    conc_mM = ratio * volFac * etaFac_k * recvFac * (Rref / Rk) * (nPref / nPk) * extRef.refConc_mM;
 
     % internal-reference value for the same metabolite (for comparison)
     ci = NaN;
@@ -308,12 +378,14 @@ for k = 1:numel(fitNames)
         j = find(strcmp({internalAbsQ.metabolites.name}, nm), 1);
         if ~isempty(j), ci = internalAbsQ.metabolites(j).conc_mM; end
     end
+    if isempty(ppmK), ppmK = NaN; end
 
     absExt.metabolites(end+1) = struct( ...
         'name', nm, 'area', fitAreas(k), 'conc_mM', conc_mM, ...
         'T1_ms', T1k, 'T2_ms', T2k, 'nPhos', nPk, 'R', Rk, ...
         'ratio', ratio, 'conc_internal_mM', ci, ...
-        'ext_over_int', conc_mM / ci);
+        'ext_over_int', conc_mM / ci, ...
+        'ppm', ppmK, 'eta', etaK, 'etaFac', etaFac_k);
 end
 
 % ---------------------------------------------------------------
@@ -328,20 +400,17 @@ absExt.etaFac_qc   = etaFac_qc;     % as COMPUTED, for QC
 absExt.reciprocity = isfield(extRef,'reciprocityReceive') && extRef.reciprocityReceive;
 absExt.b1method    = b1method;
 absExt.volFac      = volFac;
-absExt.brainSource = brainSource;
 absExt.V_M_source  = V_M_source;
 
 fprintf('\n=== External-reference 31P quant (%s) ===\n', extRef.anatomy);
 fprintf('  ref %.2f ppm, [ref]=%.0f mM, nP=%g, T1/T2=%.0f/%.0f ms (placeholder)\n', ...
     extRef.refPpm, extRef.refConc_mM, nPref, extRef.T1_ms, extRef.T2_ms);
-fprintf('  slab slices %s of %d  (voxel %.3g mm^3)\n', mat2str(sel), nz, voxVol_mm3);
-fprintf('  tissue seg: %s\n', brainSource);
 fprintf('  V_M source: %s\n', V_M_source);
-fprintf('  V_phantom=%.2f mL (%d vox)   V_tissue=%.2f mL   V_ref/V_M=%.4g\n', ...
-    absExt.V_ref_mL, nVoxRef, absExt.V_M_mL, volFac);
+fprintf('  V_phantom=%.3f mL   V_tissue=%.1f mL   V_ref/V_M=%.4g\n', ...
+    absExt.V_ref_mL, absExt.V_M_mL, volFac);
 if extRef.applyB1
     fprintf('  phantom B1+ via %s\n', b1method);
-    fprintf('  prescribed flip=%.1f deg -> eta = sin(relB1*flip)\n', extRef.flipDeg);
+    fprintf('  excitation model: %s\n', excModel);
     fprintf('  relB1 phantom=%.3f (eta=%.3f)   tissue=%.3f (eta=%.3f)   eta_ref/eta_M=%.4g [APPLIED]\n', ...
         relB1_ref, eta_ref, relB1_M, eta_M, etaFac);
     if absExt.reciprocity
@@ -353,155 +422,33 @@ else
     fprintf('  QC only -- relB1 phantom=%.3f  tissue=%.3f  eta_ref/eta_M=%.4g  recv=%.4g\n', ...
         relB1_ref, relB1_M, etaFac_qc, recvFac_qc);
 end
-fprintf('  %-10s %12s %12s %10s\n','metabolite','ext[mM]','int[mM]','ext/int');
+fprintf('  %-10s %8s %8s %8s %12s %12s %10s\n','metabolite','ppm','eta','etaFac','ext[mM]','int[mM]','ext/int');
+fprintf('  %-10s %8.2f %8.4f %8s\n', 'RefExt', extRef.refPpm, eta_ref, '-');
 for k = 1:numel(absExt.metabolites)
     m = absExt.metabolites(k);
-    fprintf('  %-10s %12.4g %12.4g %10.3f\n', m.name, m.conc_mM, m.conc_internal_mM, m.ext_over_int);
+    fprintf('  %-10s %8.2f %8.4f %8.4f %12.4g %12.4g %10.3f\n', m.name, m.ppm, m.eta, m.etaFac, ...
+        m.conc_mM, m.conc_internal_mM, m.ext_over_int);
 end
 
-% ---------------------------------------------------------------
-% Optional QC figure: segmentation overlay
-% ---------------------------------------------------------------
-if isfield(extRef,'plt') && extRef.plt
-    try
-        f = figure('Name','extRef segmentation','Position',[50 50 1300 700]);
-        tiledlayout(f,'flow','Padding','compact','TileSpacing','compact');
-        for kk = 1:numel(sel)
-            nexttile;
-            rgb = repmat(mat2gray(mag(:,:,kk)), [1 1 3]);
-            tk = tissueMask(:,:,kk); pk = phantomMask(:,:,kk);
-            r = rgb(:,:,1); g = rgb(:,:,2); b = rgb(:,:,3);
-            g(tk) = min(1, g(tk) + 0.35);            % tissue -> green tint
-            r(pk) = 1; g(pk) = 0.2; b(pk) = 0.2;      % phantom -> red
-            rgb = cat(3,r,g,b);
-            image(rgb); axis image off; title(sprintf('sl %d',sel(kk)),'FontSize',8);
-        end
-        if nargin >= 8 && ~isempty(outDir)
-            if nargin < 9 || isempty(scanID), scanID = 'extRef'; end
-            print(f, fullfile(outDir, sprintf('%s_extRef_seg.png', scanID)), '-dpng','-r100');
-        end
-    catch ME
-        warning('extRefQuant31P: QC figure failed: %s', ME.message);
-    end
-end
 
 end
 
-% ====================================================================
-function [px, slthk] = b1VoxelDims(b1Dir)
-d = dir(fullfile(b1Dir,'*.IMA'));
-if isempty(d), d = dir(fullfile(b1Dir,'*.dcm')); end
-assert(~isempty(d), 'b1VoxelDims: no DICOM in %s', b1Dir);
-di = dicominfo(fullfile(b1Dir, d(1).name));
-px = double(di.PixelSpacing(:))';
-if isfield(di,'SliceThickness') && ~isempty(di.SliceThickness)
-    slthk = double(di.SliceThickness);
-elseif isfield(di,'SpacingBetweenSlices')
-    slthk = double(di.SpacingBetweenSlices);
-else
-    slthk = px(1);
-end
+% =====================================================================
+function v = getfielddef(s, f, dflt)
+% Struct field with a default, so older extRef structs still work.
+if isstruct(s) && isfield(s,f) && ~isempty(s.(f)), v = s.(f); else, v = dflt; end
 end
 
-% ====================================================================
-function BW = keepLargestCC(BW)
-CC = bwconncomp(BW);
-if CC.NumObjects <= 1, return; end
-n = cellfun(@numel, CC.PixelIdxList);
-[~,imax] = max(n);
-out = false(size(BW));
-out(CC.PixelIdxList{imax}) = true;
-BW = out;
-end
-
-% ====================================================================
-function BW = imdilate3(BW, r)
-% simple isotropic 3D dilation by r voxels (cube structuring element)
-se = true(2*r+1, 2*r+1, 2*r+1);
-BW = imdilate(BW, se);
-end
-
-% ====================================================================
-function [mask, src] = computeTissueMask(extRef, mag, gmax, sel)
-% Tissue mask in B1-map (slab-slice) space.  Brain and calf share the
-% intensity-threshold path; only brain has the HD-BET branch.
-if isfield(extRef,'brainMask') && ~isempty(extRef.brainMask)
-    bm = logical(extRef.brainMask);
-    if size(bm,3) ~= size(mag,3) && size(bm,3) >= max(sel)
-        bm = bm(:,:,sel);
-    end
-    assert(isequal(size(bm), size(mag)), 'brainMask size %s ~= B1 slab-slice size %s', ...
-        mat2str(size(bm)), mat2str(size(mag)));
-    mask = bm; src = 'caller-supplied tissue mask (B1 space)';
-    return
-end
-if strcmpi(extRef.anatomy,'brain') && isfield(extRef,'brainMaskNii') && ~isempty(extRef.brainMaskNii)
-    warning(['extRefQuant31P: brainMaskNii set but NIfTI->B1 resampling is not ' ...
-             'yet validated; using intensity-threshold head for the B1 average.']);
-end
-% Largest bright connected component.
-%   brain -> head (includes skull/scalp)
-%   calf  -> leg  (includes subcutaneous fat and marrow, which carry no
-%                  PCr/ATP, so V_M is an overestimate -- see header)
-body = mag > extRef.brainThr * gmax;
-body = keepLargestCC(body);
-body = imfill(body, 'holes');
-mask = body;
-if strcmpi(extRef.anatomy,'calf')
-    src = 'intensity-threshold leg, incl. fat/marrow [calf]';
-else
-    src = 'intensity-threshold head, incl. skull/scalp [FALLBACK]';
-end
-end
-
-% ====================================================================
-function val = extrapB1ToMask(B1c, fitMask, tgtMask, order)
-% Fit a low-order 3D polynomial to the valid tissue B1+ samples and evaluate
-% it (mean) over the target (phantom) mask.  Coords are centered/scaled by
-% the tissue-sample statistics for conditioning and controlled extrapolation.
-sz = size(B1c, 1:3);
-[I,J,K] = ndgrid(1:sz(1), 1:sz(2), 1:sz(3));
-valid = fitMask & B1c > 0 & B1c < 1.8;
-xf = I(valid); yf = J(valid); zf = K(valid); bf = B1c(valid);
-assert(numel(bf) > 20, 'extrapB1ToMask: too few valid brain B1 samples (%d)', numel(bf));
-mu = [mean(xf) mean(yf) mean(zf)];
-sc = [std(xf)  std(yf)  std(zf)];  sc(sc == 0) = 1;
-A  = polyDesign((xf-mu(1))/sc(1), (yf-mu(2))/sc(2), (zf-mu(3))/sc(3), order);
-coef = A \ bf;
-xt = I(tgtMask); yt = J(tgtMask); zt = K(tgtMask);
-At = polyDesign((xt-mu(1))/sc(1), (yt-mu(2))/sc(2), (zt-mu(3))/sc(3), order);
-val = mean(At * coef);
-end
-
-% ====================================================================
-function A = polyDesign(x, y, z, order)
-x = x(:); y = y(:); z = z(:);
-A = [];
-for dx = 0:order
-    for dy = 0:order-dx
-        for dz = 0:order-dx-dy
-            A = [A, (x.^dx).*(y.^dy).*(z.^dz)]; %#ok<AGROW>
-        end
-    end
-end
-end
-
-% ====================================================================
-function r1 = calcRelB1_unmasked(i1, i2, i3, alpha)
-i1 = double(i1); i2 = double(i2); i3 = double(i3);
-r  = i2 ./ (1.0 + i1);
-r(i2 > i1) = -r(i2 > i1);
-x  = 0.25 * (r + sqrt(r.*r + 8.0));
-r1 = acos(min(max(x,-1),1)) / alpha;
-r  = i3 ./ (1.0 + i2);
-r(i3 > i2) = -r(i3 > i2);
-x  = 0.25 * (r + sqrt(r.*r + 8.0));
-r2 = acos(min(max(x,-1),1)) / (2*alpha);
-r1(r1 < 1.0) = r2(r1 < 1.0);
-end
-
-% ====================================================================
-function m = safeMean(v)
-v = v(:); v = v(isfinite(v));
-if isempty(v), m = NaN; else, m = mean(v); end
+% =====================================================================
+function ppm = ppmOfMet(extRef, name)
+% Chemical shift of one fitted component, from the basis table the driver
+% passes through as extRef.basisInfo (basisInfo(k).name / .refPpm from
+% make31P_basisFIDs).  Empty when unavailable -- callers fall back to the
+% tissue reference shift rather than guessing.
+ppm = [];
+if ~isfield(extRef,'basisInfo') || isempty(extRef.basisInfo), return, end
+bi = extRef.basisInfo;
+j  = find(strcmp({bi.name}, name), 1);
+if isempty(j) || ~isfield(bi,'refPpm') || ~isfinite(bi(j).refPpm), return, end
+ppm = bi(j).refPpm;
 end
