@@ -1,3 +1,6 @@
 *.mat
 *.asv
+*.png
 /4Dushyant
+/_*
+.DS_STORE
