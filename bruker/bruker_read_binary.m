@@ -64,8 +64,8 @@ else
 end
 
 % ---- reshape ------------------------------------------------------------
-if isempty(shape) || isequal(shape, 0)
-    % no shape info – return 1-D
+if isempty(shape) || isequal(shape, 0) || isscalar(shape)
+    % no shape info or 1-D – return 1-D
     return;
 end
 

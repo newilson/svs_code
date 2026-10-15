@@ -95,7 +95,7 @@ else
     npts     = size(nws,1);
     nave     = nwsParams.acqus.NS;              % NWS averages (sum-of-NS in fid)
     seqname  = nwsParams.acqus.PULPROG;
-    TR_ms    = nwsParams.acqus.D(2) * 1e3;
+    TR_ms    = selgpseTR_ms(nwsParams.acqus);
     TE_ms    = 2 * nwsParams.acqus.D(17) * 1e3 + 2 * nwsParams.acqus.P(17) / 1e3 + nwsParams.acqus.P(13) / 1e3;                             % no TE field in 1D acqus
     rcv_gain = nwsParams.acqus.RG;
     center_freq_Hz = nwsParams.acqus.O1;
@@ -159,7 +159,7 @@ f0       = wsParams.acqus.BF1;
 npts     = size(ws,1);
 nave     = wsParams.acqus.NS;
 seqname  = wsParams.acqus.PULPROG;
-TR_ms    = wsParams.acqus.D(2) * 1e3;
+TR_ms    = selgpseTR_ms(wsParams.acqus);
 TE_ms    = 2 * wsParams.acqus.D(17) * 1e3 + 2 * wsParams.acqus.P(17) / 1e3 + wsParams.acqus.P(13) / 1e3;  % no TE field in 1D acqus
 rcv_gain = wsParams.acqus.RG;
 center_freq_Hz = wsParams.acqus.O1;
@@ -173,10 +173,18 @@ end
 % Normalize to Receiver Gain and Averages
 ws = ws / rcv_gain / nave;
 
-% collapse averages — no block averaging
+% collapse averages — no block averaging.  pars.serIndex selects ONE row of a
+% 2D ser (relaxometry series) instead of averaging.
 if ~isempty(ws) && size(ws,2) > 1
-    disp('averaging WS across scans')
-    ws = mean(ws, 2);
+    if isfield(pars,'serIndex') && ~isempty(pars.serIndex)
+        assert(pars.serIndex >= 1 && pars.serIndex <= size(ws,2), ...
+            'pars.serIndex %d outside 1..%d', pars.serIndex, size(ws,2));
+        fprintf('selecting WS ser row %d of %d\n', pars.serIndex, size(ws,2));
+        ws = ws(:, pars.serIndex);
+    else
+        disp('averaging WS across scans')
+        ws = mean(ws, 2);
+    end
 end
 
 if pars.removeOS
@@ -219,10 +227,10 @@ else
     % Measure water's pre-ECC frequency from nws and restore it afterward so
     % the ppm axis (built from center_freq_Hz) keeps its meaning.
     if pars.eccopt == 0
-        % Water resonates at 4.7 ppm; its offset from the transmitter is fixed
-        % by ppm = (center_freq_Hz + hz)/f0, so f_water_Hz = 4.7*f0 - center_freq_Hz.
+        % Water resonates at 4.7 ppm; its offset from the NWS transmitter is
+        % f_water_Hz = 4.7*f0 - O1_nws (O1 may differ between WS and NWS).
         watPPM = 4.7;
-        f_water_Hz = watPPM*f0 - center_freq_Hz;
+        f_water_Hz = watPPM*f0 - output.wat.center_freq_Hz;
         fprintf('  Klose ECC: water expected at %.2f Hz (%.2f ppm); restoring after correction\n', ...
             f_water_Hz, watPPM);
     end
@@ -560,7 +568,7 @@ if pars.dofit
         %   .mode/.ph_range/.baselineOpt/.lineShapeOpt/.focusRange/.focusWeight
         %             - optional per-region overrides of the shared settings
         % When unset, a single implicit region spans the coarse range with
-        % every peak, reproducing the original single-region behaviour.
+        % every peak, reproducing the original single-region behavior.
         % pars.fit.coarseMode controls how coarse fit + phase correction are
         % derived for multiple regions:
         %   'perRegion' (default) - independent coarse->phase->fine per region
@@ -1241,6 +1249,12 @@ rmpath([thisPath filesep 'utils']);
 % (copied from dat2mat_svsNAD.m; keep in sync)
 % =================================================================== %
 
+function TR_ms = selgpseTR_ms(acqus)
+% Repetition period of selgpse_cwl: 30m + d1 + p11 + p12 + 2*(p16+d16) + AQ.
+AQ_ms = acqus.TD/2 / acqus.SW_h * 1e3;
+TR_ms = 30 + acqus.D(2)*1e3 + (acqus.P(12) + acqus.P(13))/1e3 ...
+        + 2*(acqus.P(17)/1e3 + acqus.D(17)*1e3) + AQ_ms;
+
 function lbl = regionLabel(regionList, r)
 % Region display label: its .name if set, else 'region<r>'.
     lbl = sprintf('region%d', r);
@@ -1288,7 +1302,7 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = coarseHsvdPhase( ...
 %
 % The FID is decomposed into damped sinusoids; components falling inside a
 % peak's range AND passing the linewidth / phase filters are assigned to that
-% peak and give its seed centre, width and phase.  Everything unassigned is
+% peak and give its seed center, width and phase.  Everything unassigned is
 % treated as baseline.  A linear phase through the assigned peaks (weighted by
 % signal^2) is then applied to the spectrum.
 %
@@ -1348,7 +1362,7 @@ function [wsP, center0, width0, ph0, pc0, pc1, coarseFit] = coarseHsvdPhase( ...
 
     [fHz, dHz, amp] = hsvd_fit(tv, fid(1:nu), hsvdOpt.K);
 
-    ppmC = center_freq + fHz(:)/f0;      % component centre, ppm
+    ppmC = center_freq + fHz(:)/f0;      % component center, ppm
     lwHz = dHz(:)/pi;                    % Lorentzian FWHM, Hz
     phC  = angle(amp(:)) * 180/pi;       % component phase, deg
 

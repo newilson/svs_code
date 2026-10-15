@@ -115,8 +115,11 @@ cplex = opts.Cplex;
 
 if isempty(shape) || isempty(cplex)
     [gshape, gcplex] = bruker_guess_shape(params);
-    if isempty(shape),  shape = gshape; end
     if isempty(cplex),  cplex = gcplex; end
+    if isempty(shape)
+        shape = gshape;
+        if cplex, shape(end) = shape(end)/2; end   % guess is R+I points on disk
+    end
 end
 
 % ---- read binary data ---------------------------------------------------
